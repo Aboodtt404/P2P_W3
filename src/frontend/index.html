@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P File Transfer - ICP</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔗 P2P File Transfer</h1>
+            <p>Decentralized file sharing powered by ICP</p>
+        </header>
+
+        <main>
+            <!-- Mode Selection -->
+            <div id="mode-selection" class="card">
+                <h2>Choose Mode</h2>
+                <div class="button-group">
+                    <button id="btn-send" class="btn btn-primary">Send File</button>
+                    <button id="btn-receive" class="btn btn-secondary">Receive File</button>
+                </div>
+            </div>
+
+            <!-- Send Mode -->
+            <div id="send-mode" class="card hidden">
+                <h2>Send File</h2>
+                <div class="step">
+                    <label for="file-input" class="file-label">
+                        <span class="file-icon">📁</span>
+                        <span id="file-name">Choose a file to share</span>
+                    </label>
+                    <input type="file" id="file-input" class="file-input">
+                </div>
+                
+                <div id="session-display" class="session-code hidden">
+                    <p>Share this code with the receiver:</p>
+                    <div class="code-display">
+                        <span id="session-code-text">------</span>
+                        <button id="btn-copy" class="btn-icon" title="Copy to clipboard">📋</button>
+                    </div>
+                    <div id="qr-code"></div>
+                </div>
+
+                <div id="sender-status" class="status-box hidden">
+                    <p id="sender-status-text">Waiting for receiver...</p>
+                    <div class="progress-bar hidden">
+                        <div class="progress-fill" id="send-progress"></div>
+                    </div>
+                    <span id="send-progress-text"></span>
+                </div>
+
+                <button id="btn-cancel-send" class="btn btn-cancel hidden">Cancel</button>
+            </div>
+
+            <!-- Receive Mode -->
+            <div id="receive-mode" class="card hidden">
+                <h2>Receive File</h2>
+                <div class="step">
+                    <label for="code-input">Enter the 6-digit code:</label>
+                    <input 
+                        type="text" 
+                        id="code-input" 
+                        class="code-input" 
+                        placeholder="ABC123"
+                        maxlength="6"
+                        autocomplete="off"
+                    >
+                    <button id="btn-join" class="btn btn-primary">Join Session</button>
+                </div>
+
+                <div id="file-preview" class="file-preview hidden">
+                    <h3>Incoming File</h3>
+                    <div class="file-info">
+                        <p><strong>Name:</strong> <span id="preview-filename">-</span></p>
+                        <p><strong>Size:</strong> <span id="preview-filesize">-</span></p>
+                        <p><strong>Type:</strong> <span id="preview-filetype">-</span></p>
+                    </div>
+                    <div class="button-group">
+                        <button id="btn-accept" class="btn btn-success">Accept</button>
+                        <button id="btn-reject" class="btn btn-cancel">Reject</button>
+                    </div>
+                </div>
+
+                <div id="receiver-status" class="status-box hidden">
+                    <p id="receiver-status-text">Connecting...</p>
+                    <div class="progress-bar hidden">
+                        <div class="progress-fill" id="receive-progress"></div>
+                    </div>
+                    <span id="receive-progress-text"></span>
+                </div>
+
+                <button id="btn-cancel-receive" class="btn btn-cancel hidden">Cancel</button>
+            </div>
+
+            <!-- Back Button -->
+            <button id="btn-back" class="btn btn-back hidden">← Back</button>
+        </main>
+
+        <footer>
+            <p>Built on the Internet Computer • Phase 1 Prototype</p>
+        </footer>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
+

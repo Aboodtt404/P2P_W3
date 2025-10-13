@@ -1,0 +1,25 @@
+# dfx
+.dfx/
+dist/
+node_modules/
+
+# Frontend
+src/frontend/dist/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Build artifacts
+*.wasm
+*.did
+
+# Logs
+*.log
+

@@ -1,0 +1,29 @@
+{
+  "name": "p2p-file-transfer-icp",
+  "version": "0.1.0",
+  "description": "Decentralized P2P file transfer using ICP and WebRTC",
+  "scripts": {
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "dfx build backend",
+    "build:frontend": "mkdir -p src/frontend/dist && cp src/frontend/index.html src/frontend/dist/ && cp src/frontend/styles.css src/frontend/dist/ && cp src/frontend/app.js src/frontend/dist/",
+    "deploy": "dfx deploy",
+    "deploy:local": "dfx deploy --network local",
+    "start": "dfx start --background && npm run deploy:local",
+    "stop": "dfx stop"
+  },
+  "keywords": [
+    "icp",
+    "webrtc",
+    "p2p",
+    "file-transfer",
+    "blockchain",
+    "decentralized"
+  ],
+  "dependencies": {
+    "@dfinity/agent": "^0.21.0",
+    "@dfinity/candid": "^0.21.0",
+    "@dfinity/principal": "^0.21.0"
+  },
+  "devDependencies": {}
+}
+
