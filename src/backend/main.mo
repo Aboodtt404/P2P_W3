@@ -12,7 +12,7 @@ import Blob "mo:base/Blob";
 import Nat8 "mo:base/Nat8";
 import Option "mo:base/Option";
 
-actor P2PSignaling {
+persistent actor P2PSignaling {
     // Types
     type SessionId = Text;
     type PeerId = Text;
@@ -34,29 +34,25 @@ actor P2PSignaling {
     };
 
     // Constants
-    let SESSION_TTL_SECONDS : Int = 600; // 10 minutes
-    let MAX_PEERS_PER_SESSION : Nat = 2;
-    let CODE_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private transient let SESSION_TTL_SECONDS : Int = 600; // 10 minutes
+    private transient let MAX_PEERS_PER_SESSION : Nat = 2;
+    private transient let CODE_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     // State
-    private var sessions = HashMap.HashMap<SessionId, Session>(10, Text.equal, Text.hash);
-    private var codeToSessionId = HashMap.HashMap<Text, SessionId>(10, Text.equal, Text.hash);
-    private var sessionCounter : Nat = 0;
+    private transient var sessions = HashMap.HashMap<SessionId, Session>(10, Text.equal, Text.hash);
+    private transient var codeToSessionId = HashMap.HashMap<Text, SessionId>(10, Text.equal, Text.hash);
+    private transient var sessionCounter : Nat = 0;
 
     // Helper: Generate a 6-digit alphanumeric code
     private func generateCode(seed: Nat) : Text {
+        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let charsArray = Text.toArray(chars);
         var code = "";
         var n = seed;
         
         for (i in Iter.range(0, 5)) {
             let index = n % 36;
-            let char = Text.fromChar(
-                switch (index) {
-                    case (i) if (i < 10) { Nat8.toNat(Nat8.fromNat(48 + i)) }; // 0-9
-                    case (i) { Nat8.toNat(Nat8.fromNat(65 + i - 10)) }; // A-Z
-                }
-            );
-            code := code # char;
+            code := code # Text.fromChar(charsArray[index]);
             n := n / 36 + i * 7; // Add variation to avoid similar codes
         };
         
