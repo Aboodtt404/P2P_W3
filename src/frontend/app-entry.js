@@ -50,14 +50,16 @@ const idlFactory = ({ IDL }) => {
 // Initialize ICP Agent
 async function initializeICPAgent() {
   try {
-    const urlParams = new URLSearchParams(window.location.search);
-    const canisterId = urlParams.get('canisterId') || 'uxrrr-q7777-77774-qaaaq-cai';
+    // IMPORTANT: Use BACKEND canister ID, not frontend canister ID
+    // The frontend canister ID is in the URL, but we need the backend one
+    const BACKEND_CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
+    
     const host = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') 
       ? 'http://127.0.0.1:4943' 
       : 'https://ic0.app';
     
     console.log('Initializing ICP Agent...');
-    console.log('Canister ID:', canisterId);
+    console.log('Backend Canister ID:', BACKEND_CANISTER_ID);
     console.log('Host:', host);
     
     const agent = new HttpAgent({ host });
@@ -67,7 +69,7 @@ async function initializeICPAgent() {
       await agent.fetchRootKey();
     }
     
-    const actor = Actor.createActor(idlFactory, { agent, canisterId });
+    const actor = Actor.createActor(idlFactory, { agent, canisterId: BACKEND_CANISTER_ID });
     
     console.log('✅ ICP Agent initialized successfully');
     

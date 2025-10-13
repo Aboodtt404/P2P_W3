@@ -225,12 +225,24 @@ async function createSession() {
         state.sessionId = response.sessionId;
         state.sessionCode = response.code;
 
+        // IMPORTANT: Sender must also register as a peer!
+        console.log('Registering sender as peer...');
+        const registerResponse = await canister.registerPeer(state.sessionCode, state.peerId);
+        
+        if (registerResponse.err) {
+            console.error('Error registering sender:', registerResponse.err);
+            alert('Failed to register as peer: ' + registerResponse.err);
+            resetApp();
+            return;
+        }
+
         sessionCodeText.textContent = state.sessionCode;
         sessionDisplay.classList.remove('hidden');
         senderStatusText.textContent = 'Waiting for receiver...';
         btnCancelSend.classList.remove('hidden');
 
         console.log('Session created:', { sessionId: state.sessionId, code: state.sessionCode });
+        console.log('Sender registered to session');
 
         // Setup as offerer (sender creates the offer)
         await setupWebRTCConnection(true);
