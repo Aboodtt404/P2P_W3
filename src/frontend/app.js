@@ -124,6 +124,11 @@ class AppState {
         this.isResuming = false;
         this.resumeFromChunk = 0;
         this.receivedChunkMap = new Set(); // Track which chunks we have
+        
+        // Pause/Resume + Transfer control
+        this.isPaused = false;
+        this.transferAccepted = false; // Receiver must accept before transfer starts
+        this.pendingChunks = []; // Buffer chunks before acceptance
     }
 
     generatePeerId() {
@@ -167,6 +172,11 @@ class AppState {
         this.isResuming = false;
         this.resumeFromChunk = 0;
         this.receivedChunkMap = new Set();
+        
+        // Reset pause/control state
+        this.isPaused = false;
+        this.transferAccepted = false;
+        this.pendingChunks = [];
     }
 
     closeConnections() {
@@ -989,20 +999,47 @@ async function handleSignalFromCanister(signal) {
 // FILE TRANSFER FUNCTIONS
 // ============================================================================
 
-function sendFileMetadata() {
+async function sendFileMetadata() {
     if (!state.selectedFile || !state.dataChannel) {
-        
+        debugLog('transfer', '❌ Cannot send metadata: missing file or channel');
         return;
+    }
+
+    // Check if file should be compressed
+    const shouldCompress = shouldCompressFile(state.selectedFile);
+    let fileToSend = state.selectedFile;
+    let actualSize = state.selectedFile.size;
+
+    if (shouldCompress) {
+        senderStatusText.textContent = 'Compressing file...';
+        const compressedData = await compressFile(state.selectedFile);
+        fileToSend = new Blob([compressedData]);
+        actualSize = compressedData.length;
+        state.isCompressed = true;
+        state.originalSize = state.selectedFile.size;
+        state.compressedSize = actualSize;
     }
 
     const metadata = {
         type: 'metadata',
         fileName: state.selectedFile.name,
-        fileSize: state.selectedFile.size,
+        fileSize: actualSize,
+        originalSize: state.selectedFile.size,
         fileType: state.selectedFile.type || 'application/octet-stream',
-        totalChunks: Math.ceil(state.selectedFile.size / CHUNK_SIZE)
+        totalChunks: Math.ceil(actualSize / CHUNK_SIZE),
+        isCompressed: state.isCompressed
     };
 
+    debugLog('transfer', '📤 Sending file metadata', {
+        fileName: metadata.fileName,
+        originalSize: state.selectedFile.size,
+        actualSize: actualSize,
+        isCompressed: state.isCompressed,
+        compressionRatio: state.isCompressed ? `${((1 - actualSize / state.selectedFile.size) * 100).toFixed(1)}%` : 'N/A'
+    });
+
+    // Store the file to send
+    state.fileToSend = fileToSend;
     
     state.dataChannel.send(JSON.stringify(metadata));
     
@@ -1016,6 +1053,10 @@ async function sendFileData() {
         return;
     }
 
+    // Use compressed file if available
+    const fileToSend = state.fileToSend || state.selectedFile;
+    const fileSize = fileToSend.size;
+
     // Initialize transfer metrics
     state.transferStartTime = Date.now();
     state.chunksSent = 0;
@@ -1025,26 +1066,27 @@ async function sendFileData() {
     
     debugLog('transfer', '🚀 Starting file transfer', {
         fileName: state.selectedFile.name,
-        fileSize: state.selectedFile.size,
+        fileSize: fileSize,
+        isCompressed: state.isCompressed,
         chunkSize: CHUNK_SIZE,
-        totalChunks: Math.ceil(state.selectedFile.size / CHUNK_SIZE)
+        totalChunks: Math.ceil(fileSize / CHUNK_SIZE)
     });
     
     senderStatusText.textContent = 'Sending file...';
     document.querySelector('#sender-status .progress-bar').classList.remove('hidden');
 
-    const totalChunks = Math.ceil(state.selectedFile.size / CHUNK_SIZE);
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
     let offset = 0;
     let chunkIndex = 0;
     let bytesSent = 0;
 
-    while (offset < state.selectedFile.size) {
+    while (offset < fileSize) {
         // ⭐ FLOW CONTROL: Wait for buffer to drain before sending more
         if (state.dataChannel.bufferedAmount > BUFFER_CHECK_THRESHOLD) {
             await waitForBuffer(state.dataChannel);
         }
         
-        const chunk = state.selectedFile.slice(offset, offset + CHUNK_SIZE);
+        const chunk = fileToSend.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await chunk.arrayBuffer();
         
         // Send chunk header (as JSON string)
@@ -1116,6 +1158,11 @@ function handleDataChannelMessage(data) {
             // Ignore calibration test messages on receiver side
             debugLog('datachannel', 'Received calibration test (ignoring)');
             return;
+        } else if (message.type === 'resume') {
+            // Receiver wants to resume from specific chunk
+            debugLog('transfer', '⏯️  Resume request received', { fromChunk: message.fromChunk });
+            state.resumeFromChunk = message.fromChunk;
+            // Sender will skip already-sent chunks
         } else if (message.type === 'metadata') {
             handleFileMetadata(message);
         } else if (message.type === 'chunk') {
@@ -1137,27 +1184,71 @@ function handleDataChannelMessage(data) {
     }
 }
 
-function handleFileMetadata(metadata) {
+async function handleFileMetadata(metadata) {
     debugLog('receive', '📄 Received file metadata', {
         fileName: metadata.fileName,
         fileSize: metadata.fileSize,
-        totalChunks: metadata.totalChunks
+        totalChunks: metadata.totalChunks,
+        isCompressed: metadata.isCompressed
     });
     
     state.fileMetadata = metadata;
     state.totalChunks = metadata.totalChunks;
     state.receivedChunks = [];
+    state.isCompressed = metadata.isCompressed || false;
+    state.originalSize = metadata.originalSize || metadata.fileSize;
     
     // Initialize receive metrics
     state.transferStartTime = Date.now();
     state.lastSpeedUpdate = Date.now();
     state.lastBytesTransferred = 0;
     state.chunksReceived = 0;
+    
+    // Check for resume capability
+    if (ENABLE_RESUME) {
+        const partial = await loadPartialTransfer(state.sessionCode);
+        if (partial && partial.fileMetadata.fileName === metadata.fileName) {
+            const resumeConfirm = confirm(
+                `Found incomplete transfer:\n${partial.fileMetadata.fileName}\n` +
+                `Progress: ${partial.receivedChunks.length}/${partial.totalChunks} chunks ` +
+                `(${Math.round((partial.receivedChunks.length / partial.totalChunks) * 100)}%)\n\n` +
+                `Resume download?`
+            );
+            
+            if (resumeConfirm) {
+                // Restore state
+                state.receivedChunks = partial.receivedChunks;
+                state.receivedChunkMap = new Set(partial.receivedChunkMap);
+                state.receivedBytes = partial.receivedBytes;
+                state.isResuming = true;
+                
+                debugLog('resume', '⏯️  Resuming transfer', {
+                    from: partial.receivedChunks.length,
+                    total: partial.totalChunks
+                });
+                
+                // Notify sender to resume from last chunk
+                state.dataChannel.send(JSON.stringify({
+                    type: 'resume',
+                    fromChunk: partial.receivedChunks.length
+                }));
+            } else {
+                // User declined, delete partial transfer
+                await deletePartialTransfer(state.sessionCode);
+            }
+        }
+    }
 
     // Show file preview for user acceptance
     previewFilename.textContent = metadata.fileName;
-    previewFilesize.textContent = formatFileSize(metadata.fileSize);
-    previewFiletype.textContent = metadata.fileType;
+    previewFilesize.textContent = formatFileSize(metadata.originalSize || metadata.fileSize);
+    
+    let typeText = metadata.fileType;
+    if (state.isCompressed) {
+        const compressionRatio = ((1 - metadata.fileSize / metadata.originalSize) * 100).toFixed(1);
+        typeText += ` (Compressed ${compressionRatio}%)`;
+    }
+    previewFiletype.textContent = typeText;
     
     receiverStatus.classList.add('hidden');
     filePreview.classList.remove('hidden');
@@ -1167,9 +1258,15 @@ function handleFileChunk(arrayBuffer) {
     state.receivedChunks.push(arrayBuffer);
     state.receivedBytes += arrayBuffer.byteLength;
     state.chunksReceived++;
+    state.receivedChunkMap.add(state.chunksReceived - 1);
     
     // Update transfer speed calculation
     updateTransferSpeed(state.receivedBytes);
+
+    // ⭐ Save progress every 50 chunks for resume capability
+    if (ENABLE_RESUME && state.receivedChunks.length % 50 === 0) {
+        savePartialTransfer();
+    }
 
     // Update progress
     const progress = Math.min((state.receivedChunks.length / state.totalChunks) * 100, 100);
@@ -1192,7 +1289,7 @@ function handleFileChunk(arrayBuffer) {
     }
 }
 
-function handleTransferComplete() {
+async function handleTransferComplete() {
     const transferDuration = ((Date.now() - state.transferStartTime) / 1000).toFixed(2);
     const avgSpeed = (state.receivedBytes / (Date.now() - state.transferStartTime) / 1024).toFixed(2);
     
@@ -1200,11 +1297,39 @@ function handleTransferComplete() {
         totalChunks: state.chunksReceived,
         fileSize: state.receivedBytes,
         duration: `${transferDuration}s`,
-        avgSpeed: `${avgSpeed} MB/s`
+        avgSpeed: `${avgSpeed} MB/s`,
+        isCompressed: state.isCompressed
     });
     
-    // Combine all chunks into a single Blob
-    const blob = new Blob(state.receivedChunks, { type: state.fileMetadata.fileType });
+    let blob;
+    
+    // Handle decompression if file was compressed
+    if (state.isCompressed) {
+        receiverStatusText.textContent = 'Decompressing file...';
+        
+        try {
+            // Combine compressed chunks
+            const compressedBlob = new Blob(state.receivedChunks);
+            const compressedData = await compressedBlob.arrayBuffer();
+            
+            // Decompress
+            const decompressedData = decompressFile(compressedData);
+            blob = new Blob([decompressedData], { type: state.fileMetadata.fileType });
+            
+            debugLog('compression', '🎉 Decompression successful', {
+                compressedSize: state.receivedBytes,
+                decompressedSize: decompressedData.byteLength,
+                ratio: `${((1 - state.receivedBytes / decompressedData.byteLength) * 100).toFixed(1)}%`
+            });
+        } catch (error) {
+            debugLog('compression', '❌ Decompression failed', error);
+            alert('Decompression failed! File may be corrupted.');
+            return;
+        }
+    } else {
+        // Combine chunks as-is (not compressed)
+        blob = new Blob(state.receivedChunks, { type: state.fileMetadata.fileType });
+    }
     
     // Trigger download
     const url = URL.createObjectURL(blob);
@@ -1215,6 +1340,11 @@ function handleTransferComplete() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
+    // Delete saved partial transfer (complete now)
+    if (ENABLE_RESUME) {
+        deletePartialTransfer(state.sessionCode);
+    }
 
     receiverStatusText.textContent = 'Download complete!';
     receiveProgressText.textContent = `File received successfully (${formatFileSize(state.receivedBytes)}) - ${avgSpeed} MB/s avg`;
