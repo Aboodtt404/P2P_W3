@@ -28,7 +28,8 @@
     "buffer": "^6.0.3",
     "events": "^3.3.0",
     "stream-browserify": "^3.0.0",
-    "util": "^0.12.5"
+    "util": "^0.12.5",
+    "pako": "^2.1.0"
   },
   "devDependencies": {
     "@babel/core": "^7.23.0",

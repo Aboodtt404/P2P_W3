@@ -3,62 +3,108 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P File Transfer - ICP</title>
+    <title>Transfer — Peer to Peer</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 </head>
 <body>
+    <div class="noise"></div>
     <div class="container">
         <header>
-            <h1>🔗 P2P File Transfer</h1>
-            <p>Decentralized file sharing powered by ICP</p>
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                    <circle cx="16" cy="16" r="4" fill="currentColor"/>
+                </svg>
+                <span>Transfer</span>
+            </div>
+            <p class="subtitle">Direct. Encrypted. No middleman.</p>
         </header>
 
         <main>
             <!-- Mode Selection -->
-            <div id="mode-selection" class="card">
-                <h2>Choose Mode</h2>
-                <div class="button-group">
-                    <button id="btn-send" class="btn btn-primary">Send File</button>
-                    <button id="btn-receive" class="btn btn-secondary">Receive File</button>
+            <div id="mode-selection" class="card mode-card">
+                <h2>What would you like to do?</h2>
+                <div class="mode-options">
+                    <button id="btn-send" class="mode-btn send-btn">
+                        <div class="mode-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                        </div>
+                        <span class="mode-title">Send</span>
+                        <span class="mode-desc">Share a file</span>
+                    </button>
+                    <button id="btn-receive" class="mode-btn receive-btn">
+                        <div class="mode-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                            </svg>
+                        </div>
+                        <span class="mode-title">Receive</span>
+                        <span class="mode-desc">Join with code</span>
+                    </button>
                 </div>
             </div>
 
             <!-- Send Mode -->
             <div id="send-mode" class="card hidden">
-                <h2>Send File</h2>
-                <div class="step">
-                    <label for="file-input" class="file-label">
-                        <span class="file-icon">📁</span>
-                        <span id="file-name">Choose a file to share</span>
-                    </label>
-                    <input type="file" id="file-input" class="file-input">
+                <div class="card-header">
+                    <h2>Send File</h2>
+                    <span class="step-indicator">Step 1 of 2</span>
                 </div>
                 
-                <div id="session-display" class="session-code hidden">
-                    <p>Share this code with the receiver:</p>
-                    <div class="code-display">
-                        <span id="session-code-text">------</span>
-                        <button id="btn-copy" class="btn-icon" title="Copy to clipboard">📋</button>
+                <label for="file-input" class="file-drop-zone">
+                    <input type="file" id="file-input" class="file-input">
+                    <div class="drop-icon">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                        </svg>
                     </div>
-                    <div id="qr-code"></div>
+                    <span id="file-name" class="drop-text">Drop a file or click to browse</span>
+                    <span class="drop-hint">Any file type, up to 2GB</span>
+                </label>
+                
+                <div id="session-display" class="session-info hidden">
+                    <p class="session-label">Share this code</p>
+                    <div class="code-container">
+                        <code id="session-code-text" class="transfer-code">------</code>
+                        <button id="btn-copy" class="copy-btn" title="Copy code">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
 
-                <div id="sender-status" class="status-box hidden">
-                    <p id="sender-status-text">Waiting for receiver...</p>
+                <div id="sender-status" class="status-panel hidden">
+                    <div class="status-content">
+                        <div class="status-pulse"></div>
+                        <p id="sender-status-text" class="status-text">Waiting for receiver...</p>
+                    </div>
                     <div class="progress-bar hidden">
-                        <div class="progress-fill" id="send-progress"></div>
+                        <div class="progress-track">
+                            <div class="progress-fill" id="send-progress"></div>
+                        </div>
+                        <span id="send-progress-text" class="progress-label"></span>
                     </div>
-                    <span id="send-progress-text"></span>
                 </div>
 
-                <button id="btn-cancel-send" class="btn btn-cancel hidden">Cancel</button>
+                <button id="btn-cancel-send" class="btn btn-ghost hidden">Cancel Transfer</button>
             </div>
 
             <!-- Receive Mode -->
             <div id="receive-mode" class="card hidden">
-                <h2>Receive File</h2>
-                <div class="step">
-                    <label for="code-input">Enter the 6-digit code:</label>
+                <div class="card-header">
+                    <h2>Receive File</h2>
+                    <span class="step-indicator">Enter code</span>
+                </div>
+                
+                <div class="input-group">
+                    <label for="code-input" class="input-label">6-digit transfer code</label>
                     <input 
                         type="text" 
                         id="code-input" 
@@ -67,40 +113,56 @@
                         maxlength="6"
                         autocomplete="off"
                     >
-                    <button id="btn-join" class="btn btn-primary">Join Session</button>
+                    <button id="btn-join" class="btn btn-primary">Connect</button>
                 </div>
 
-                <div id="file-preview" class="file-preview hidden">
-                    <h3>Incoming File</h3>
-                    <div class="file-info">
-                        <p><strong>Name:</strong> <span id="preview-filename">-</span></p>
-                        <p><strong>Size:</strong> <span id="preview-filesize">-</span></p>
-                        <p><strong>Type:</strong> <span id="preview-filetype">-</span></p>
+                <div id="file-preview" class="file-card hidden">
+                    <div class="file-header">
+                        <div class="file-icon-preview">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/>
+                                <polyline points="13 2 13 9 20 9"/>
+                            </svg>
+                        </div>
+                        <div class="file-details">
+                            <p class="file-name-preview" id="preview-filename">—</p>
+                            <p class="file-meta">
+                                <span id="preview-filesize">—</span>
+                                <span class="separator">•</span>
+                                <span id="preview-filetype">—</span>
+                            </p>
+                        </div>
                     </div>
-                    <div class="button-group">
-                        <button id="btn-accept" class="btn btn-success">Accept</button>
-                        <button id="btn-reject" class="btn btn-cancel">Reject</button>
+                    <div class="file-actions">
+                        <button id="btn-accept" class="btn btn-primary btn-accept">Accept Transfer</button>
+                        <button id="btn-reject" class="btn btn-ghost">Decline</button>
                     </div>
                 </div>
 
-                <div id="receiver-status" class="status-box hidden">
-                    <p id="receiver-status-text">Connecting...</p>
+                <div id="receiver-status" class="status-panel hidden">
+                    <div class="status-content">
+                        <div class="status-pulse"></div>
+                        <p id="receiver-status-text" class="status-text">Connecting...</p>
+                    </div>
                     <div class="progress-bar hidden">
-                        <div class="progress-fill" id="receive-progress"></div>
+                        <div class="progress-track">
+                            <div class="progress-fill" id="receive-progress"></div>
+                        </div>
+                        <span id="receive-progress-text" class="progress-label"></span>
                     </div>
-                    <span id="receive-progress-text"></span>
                 </div>
 
-                <button id="btn-cancel-receive" class="btn btn-cancel hidden">Cancel</button>
+                <button id="btn-cancel-receive" class="btn btn-ghost hidden">Cancel</button>
             </div>
 
-            <!-- Back Button -->
-            <button id="btn-back" class="btn btn-back hidden">← Back</button>
+            <button id="btn-back" class="back-link hidden">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+                Back
+            </button>
         </main>
 
-        <footer>
-            <p>Built on the Internet Computer</p>
-        </footer>
     </div>
 
     <script src="app.js"></script>

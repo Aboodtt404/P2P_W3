@@ -6,7 +6,7 @@
 
     // Wait for @dfinity libraries to load
     if (typeof window.ic === 'undefined' || typeof window.ic.HttpAgent === 'undefined') {
-        console.warn('@dfinity/agent not loaded, using mock implementation');
+
         window.ICPAgent = createMockAgent();
         return;
     }
@@ -87,20 +87,20 @@
         if (isInitialized) return actor;
         
         try {
-            console.log('Initializing ICP Agent...');
+
             
             const canisterId = getCanisterId();
             const host = getHost();
             
-            console.log('Canister ID:', canisterId);
-            console.log('Host:', host);
+
+
             
             // Create agent
             const agent = new HttpAgent({ host });
             
             // Fetch root key for local development
             if (host.includes('localhost') || host.includes('127.0.0.1')) {
-                console.log('Fetching root key for local development...');
+
                 await agent.fetchRootKey();
             }
             
@@ -111,13 +111,13 @@
             });
             
             isInitialized = true;
-            console.log('✅ ICP Agent initialized successfully');
+
             
             return actor;
             
         } catch (error) {
-            console.error('Failed to initialize ICP Agent:', error);
-            console.warn('Falling back to mock implementation');
+
+
             return null;
         }
     }
@@ -127,17 +127,17 @@
         const canisterActor = await initializeAgent();
         
         if (!canisterActor) {
-            console.log('Using mock: createSession');
+
             return await mockCreateSession();
         }
         
         try {
-            console.log('Calling backend.createSession()...');
+...');
             const response = await canisterActor.createSession();
-            console.log('Backend response:', response);
+
             return response;
         } catch (error) {
-            console.error('Error calling createSession:', error);
+
             return await mockCreateSession();
         }
     }
@@ -146,17 +146,17 @@
         const canisterActor = await initializeAgent();
         
         if (!canisterActor) {
-            console.log('Using mock: registerPeer');
+
             return await mockRegisterPeer(code, peerId);
         }
         
         try {
-            console.log('Calling backend.registerPeer()...', { code, peerId });
+...', { code, peerId });
             const response = await canisterActor.registerPeer(code, peerId);
-            console.log('Backend response:', response);
+
             return response;
         } catch (error) {
-            console.error('Error calling registerPeer:', error);
+
             return await mockRegisterPeer(code, peerId);
         }
     }
@@ -172,7 +172,7 @@
             const response = await canisterActor.sendSignal(sessionId, peerId, signal);
             return response;
         } catch (error) {
-            console.error('Error calling sendSignal:', error);
+
             return await mockSendSignal(sessionId, peerId, signal);
         }
     }
@@ -188,7 +188,7 @@
             const response = await canisterActor.getSignals(sessionId, peerId);
             return response;
         } catch (error) {
-            console.error('Error calling getSignals:', error);
+
             return await mockGetSignals(sessionId, peerId);
         }
     }
@@ -204,7 +204,7 @@
             const response = await canisterActor.clearSignals(sessionId, peerId);
             return response;
         } catch (error) {
-            console.error('Error calling clearSignals:', error);
+
             return { ok: null };
         }
     }
@@ -273,7 +273,7 @@
         setMockSignalQueues(queues);
         
         await delay(300);
-        console.log('Mock: Created session', { sessionId, code });
+
         return { sessionId, code };
     }
 
@@ -284,7 +284,7 @@
         const session = sessions[code];
         
         if (!session) {
-            console.log('Mock: Session not found for code', code);
+
             return { err: 'Session not found' };
         }
         
@@ -304,7 +304,7 @@
             setMockSignalQueues(queues);
         }
         
-        console.log('Mock: Registered peer', { peerId, sessionId: session.sessionId });
+
         return { ok: session.sessionId };
     }
 

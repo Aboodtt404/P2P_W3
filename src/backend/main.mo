@@ -43,17 +43,25 @@ persistent actor P2PSignaling {
     private transient var codeToSessionId = HashMap.HashMap<Text, SessionId>(10, Text.equal, Text.hash);
     private transient var sessionCounter : Nat = 0;
 
-    // Helper: Generate a 6-digit alphanumeric code
+    // Helper: Generate a random 6-digit alphanumeric code
     private func generateCode(seed: Nat) : Text {
         let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let charsArray = Text.toArray(chars);
         var code = "";
-        var n = seed;
+        
+        // Use Linear Congruential Generator with good mixing
+        var state = seed;
         
         for (i in Iter.range(0, 5)) {
-            let index = n % 36;
+            // LCG: next = (a * current + c) mod m
+            // Using well-tested constants for good randomness
+            state := (state * 1664525 + 1013904223) % 4294967296;
+            
+            // Additional mixing with different prime
+            state := (state * 2654435761) % 4294967296;
+            
+            let index = state % 36;
             code := code # Text.fromChar(charsArray[index]);
-            n := n / 36 + i * 7; // Add variation to avoid similar codes
         };
         
         code
@@ -164,12 +172,14 @@ persistent actor P2PSignaling {
         sessionCounter += 1;
         let sessionId = "session_" # Nat.toText(sessionCounter) # "_" # Int.toText(Time.now());
         
-        // Generate unique code
-        var code = generateCode(sessionCounter);
+        // Generate unique code with high entropy (combine timestamp + counter)
+        let timestamp = Int.abs(Time.now());
+        let baseSeed = (timestamp % 999999999) + (sessionCounter * 7919); // Mix timestamp with counter
+        var code = generateCode(baseSeed);
         var attempts = 0;
         while (Option.isSome(codeToSessionId.get(code)) and attempts < 100) {
             attempts += 1;
-            code := generateCode(sessionCounter + attempts * 13);
+            code := generateCode(baseSeed + attempts * 104729); // Use prime number for collision handling
         };
 
         let newSession : Session = {

@@ -1,13 +1,15 @@
 // Phase 2+ - Complete WebRTC P2P File Transfer with Real ICP Integration
 // Now using @dfinity/agent for actual canister communication
 
+import pako from 'pako'; // Compression library
+
 // ============================================================================
 // CANISTER INTERFACE - Real ICP Agent Integration
 // ============================================================================
 
 // ICPAgent should be loaded by app-entry.js before this file executes
 if (typeof window.ICPAgent === 'undefined') {
-    console.error('FATAL: ICPAgent not loaded! This should not happen.');
+    
     throw new Error('ICPAgent not available');
 }
 
@@ -17,15 +19,56 @@ const canister = window.ICPAgent;
 // CONFIGURATION
 // ============================================================================
 
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+// Dynamic chunk sizing - will be calibrated based on connection speed
+let CHUNK_SIZE = 64 * 1024; // Start with 64KB, will adjust up to 1MB
+const MIN_CHUNK_SIZE = 64 * 1024; // 64KB minimum
+const MAX_CHUNK_SIZE = 1024 * 1024; // 1MB maximum
 const POLL_INTERVAL = 1000; // Poll for signals every 1 second
 
-// ICE Servers configuration (STUN for NAT traversal)
+// Flow control settings
+const MAX_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB buffer limit
+const BUFFER_CHECK_THRESHOLD = 8 * 1024 * 1024; // Start throttling at 8MB
+
+// Debug mode for transfer diagnostics
+const DEBUG_TRANSFER = true; // Set to false in production
+
+// Resume capability settings
+const ENABLE_RESUME = true; // Enable resume on disconnect
+const RESUME_DB_NAME = 'P2PTransferResume';
+const RESUME_STORE_NAME = 'partialTransfers';
+const RESUME_EXPIRY_HOURS = 24; // Auto-delete after 24 hours
+
+// Compression settings
+const ENABLE_COMPRESSION = true; // Enable automatic compression for text files
+const COMPRESSION_MIN_SIZE = 1024; // Only compress files > 1KB
+const COMPRESSIBLE_TYPES = [
+    'text/', 'application/json', 'application/javascript', 'application/xml',
+    'application/x-javascript', 'application/typescript'
+];
+const COMPRESSIBLE_EXTENSIONS = [
+    '.txt', '.js', '.json', '.html', '.css', '.xml', '.csv', '.md',
+    '.ts', '.tsx', '.jsx', '.yml', '.yaml', '.log', '.sql', '.sh'
+];
+
+// ICE Servers configuration (STUN for NAT traversal + TURN for relay fallback)
 const ICE_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-    ]
+        { urls: 'stun:stun2.l.google.com:19302' },
+        
+        {
+            urls: 'turn:194.31.150.154:3478',
+            username: 'p2puser',
+            credential: '7c7b566b994f24d4de4664007af235c31002484500f5546259b508f758e62323'
+        },
+        {
+            urls: 'turn:194.31.150.154:3478?transport=tcp',
+            username: 'p2puser',
+            credential: '7c7b566b994f24d4de4664007af235c31002484500f5546259b508f758e62323'
+        }
+    ],
+    iceCandidatePoolSize: 10
 };
 
 // ============================================================================
@@ -44,6 +87,8 @@ class AppState {
         this.peerConnection = null;
         this.dataChannel = null;
         this.isConnected = false;
+        this.remoteDescriptionSet = false; // Track if remote description is set
+        this.pendingIceCandidates = []; // Buffer for ICE candidates received before answer
         
         // Transfer state
         this.fileMetadata = null;
@@ -51,12 +96,34 @@ class AppState {
         this.totalChunks = 0;
         this.receivedBytes = 0;
         
+        // Transfer metrics (for debugging and optimization)
+        this.transferStartTime = null;
+        this.lastSpeedUpdate = null;
+        this.lastBytesTransferred = 0;
+        this.currentSpeed = 0; // MB/s
+        this.bufferStalls = 0; // Count how many times we had to wait for buffer
+        this.chunksSent = 0;
+        this.chunksReceived = 0;
+        
         // Polling
         this.pollingInterval = null;
         
         // Track expected chunk
         this.expectingChunkData = false;
         this.currentChunkSize = 0;
+        
+        // Track processed signals to avoid duplicates
+        this.processedSignals = new Set();
+        
+        // Compression state
+        this.isCompressed = false;
+        this.originalSize = 0;
+        this.compressedSize = 0;
+        
+        // Resume capability
+        this.isResuming = false;
+        this.resumeFromChunk = 0;
+        this.receivedChunkMap = new Set(); // Track which chunks we have
     }
 
     generatePeerId() {
@@ -76,8 +143,30 @@ class AppState {
         this.totalChunks = 0;
         this.receivedBytes = 0;
         this.isConnected = false;
+        this.remoteDescriptionSet = false;
+        this.pendingIceCandidates = [];
         this.expectingChunkData = false;
         this.currentChunkSize = 0;
+        this.processedSignals = new Set();
+        
+        // Reset transfer metrics
+        this.transferStartTime = null;
+        this.lastSpeedUpdate = null;
+        this.lastBytesTransferred = 0;
+        this.currentSpeed = 0;
+        this.bufferStalls = 0;
+        this.chunksSent = 0;
+        this.chunksReceived = 0;
+        
+        // Reset compression state
+        this.isCompressed = false;
+        this.originalSize = 0;
+        this.compressedSize = 0;
+        
+        // Reset resume state
+        this.isResuming = false;
+        this.resumeFromChunk = 0;
+        this.receivedChunkMap = new Set();
     }
 
     closeConnections() {
@@ -100,6 +189,326 @@ class AppState {
 }
 
 const state = new AppState();
+
+// ============================================================================
+// DEBUG & UTILITY FUNCTIONS
+// ============================================================================
+
+// Debug logger for transfer diagnostics
+function debugLog(category, message, data = null) {
+    if (!DEBUG_TRANSFER) return;
+    
+    const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
+    const prefix = `[${timestamp}] [${category.toUpperCase()}]`;
+    
+    if (data) {
+        console.log(`${prefix} ${message}`, data);
+    } else {
+        console.log(`${prefix} ${message}`);
+    }
+}
+
+// Calibrate chunk size based on connection quality
+async function calibrateChunkSize() {
+    if (!state.dataChannel || state.dataChannel.readyState !== 'open') {
+        debugLog('calibrate', 'Cannot calibrate: data channel not ready');
+        return;
+    }
+    
+    debugLog('calibrate', 'Starting chunk size calibration...');
+    
+    const testStart = Date.now();
+    const testSize = 256 * 1024; // 256KB test
+    const testData = new ArrayBuffer(testSize);
+    
+    try {
+        state.dataChannel.send(JSON.stringify({ type: 'calibration-test' }));
+        state.dataChannel.send(testData);
+        
+        const sendDuration = Date.now() - testStart;
+        const speedMBps = (testSize / sendDuration / 1024).toFixed(2);
+        
+        debugLog('calibrate', `Test send took ${sendDuration}ms (${speedMBps} MB/s)`);
+        
+        // Adjust chunk size based on speed
+        if (sendDuration < 20) {
+            // Very fast connection
+            CHUNK_SIZE = MAX_CHUNK_SIZE; // 1MB
+            debugLog('calibrate', '🚀 Fast connection detected, using 1MB chunks');
+        } else if (sendDuration < 50) {
+            // Good connection
+            CHUNK_SIZE = 512 * 1024; // 512KB
+            debugLog('calibrate', '✅ Good connection detected, using 512KB chunks');
+        } else if (sendDuration < 100) {
+            // Medium connection
+            CHUNK_SIZE = 256 * 1024; // 256KB
+            debugLog('calibrate', '⚡ Medium connection detected, using 256KB chunks');
+        } else {
+            // Slow connection
+            CHUNK_SIZE = MIN_CHUNK_SIZE; // 64KB
+            debugLog('calibrate', '⚠️  Slow connection detected, using 64KB chunks');
+        }
+        
+        debugLog('calibrate', `Final chunk size: ${(CHUNK_SIZE / 1024).toFixed(0)}KB`);
+    } catch (error) {
+        debugLog('calibrate', 'Calibration failed, using default 64KB chunks', error);
+        CHUNK_SIZE = MIN_CHUNK_SIZE;
+    }
+}
+
+// Wait for buffer to drain
+async function waitForBuffer(channel, maxWait = 5000) {
+    const startTime = Date.now();
+    
+    while (channel.bufferedAmount > BUFFER_CHECK_THRESHOLD) {
+        // Check timeout
+        if (Date.now() - startTime > maxWait) {
+            debugLog('buffer', `⚠️  Buffer wait timeout after ${maxWait}ms`, {
+                bufferedAmount: channel.bufferedAmount,
+                threshold: BUFFER_CHECK_THRESHOLD
+            });
+            break;
+        }
+        
+        state.bufferStalls++;
+        debugLog('buffer', `⏳ Waiting for buffer to drain... (${(channel.bufferedAmount / 1024 / 1024).toFixed(2)}MB buffered)`, {
+            bufferedAmount: channel.bufferedAmount,
+            threshold: BUFFER_CHECK_THRESHOLD,
+            stallCount: state.bufferStalls
+        });
+        
+        await delay(50);
+    }
+}
+
+// Calculate current transfer speed
+function updateTransferSpeed(bytesTransferred) {
+    const now = Date.now();
+    
+    if (!state.lastSpeedUpdate) {
+        state.lastSpeedUpdate = now;
+        state.lastBytesTransferred = bytesTransferred;
+        return;
+    }
+    
+    const timeDiff = (now - state.lastSpeedUpdate) / 1000; // seconds
+    
+    // Update speed every second
+    if (timeDiff >= 1.0) {
+        const bytesDiff = bytesTransferred - state.lastBytesTransferred;
+        const speedMBps = (bytesDiff / timeDiff / (1024 * 1024)).toFixed(2);
+        
+        state.currentSpeed = parseFloat(speedMBps);
+        state.lastSpeedUpdate = now;
+        state.lastBytesTransferred = bytesTransferred;
+        
+        debugLog('speed', `📊 Transfer speed: ${speedMBps} MB/s`, {
+            bytesTransferred,
+            bytesDiff,
+            timeDiff: timeDiff.toFixed(2)
+        });
+    }
+}
+
+// ============================================================================
+// INDEXEDDB FUNCTIONS (for resume capability)
+// ============================================================================
+
+// Initialize IndexedDB
+function initResumeDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(RESUME_DB_NAME, 1);
+        
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(RESUME_STORE_NAME)) {
+                const store = db.createObjectStore(RESUME_STORE_NAME, { keyPath: 'sessionCode' });
+                store.createIndex('timestamp', 'timestamp', { unique: false });
+            }
+        };
+    });
+}
+
+// Save partial transfer to IndexedDB
+async function savePartialTransfer() {
+    if (!ENABLE_RESUME || !state.sessionCode) return;
+    
+    try {
+        const db = await initResumeDB();
+        const transaction = db.transaction([RESUME_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(RESUME_STORE_NAME);
+        
+        const data = {
+            sessionCode: state.sessionCode,
+            sessionId: state.sessionId,
+            fileMetadata: state.fileMetadata,
+            receivedChunks: state.receivedChunks,
+            receivedChunkMap: Array.from(state.receivedChunkMap),
+            receivedBytes: state.receivedBytes,
+            totalChunks: state.totalChunks,
+            timestamp: Date.now(),
+            isCompressed: state.isCompressed,
+            originalSize: state.originalSize
+        };
+        
+        store.put(data);
+        
+        await new Promise((resolve, reject) => {
+            transaction.oncomplete = () => {
+                debugLog('resume', '💾 Saved partial transfer', {
+                    chunksReceived: state.receivedChunks.length,
+                    totalChunks: state.totalChunks,
+                    progress: `${Math.round((state.receivedChunks.length / state.totalChunks) * 100)}%`
+                });
+                resolve();
+            };
+            transaction.onerror = () => reject(transaction.error);
+        });
+        
+        db.close();
+    } catch (error) {
+        debugLog('resume', '❌ Failed to save partial transfer', error);
+    }
+}
+
+// Load partial transfer from IndexedDB
+async function loadPartialTransfer(sessionCode) {
+    if (!ENABLE_RESUME) return null;
+    
+    try {
+        const db = await initResumeDB();
+        const transaction = db.transaction([RESUME_STORE_NAME], 'readonly');
+        const store = transaction.objectStore(RESUME_STORE_NAME);
+        
+        const data = await new Promise((resolve, reject) => {
+            const request = store.get(sessionCode);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+        
+        db.close();
+        
+        if (data) {
+            // Check if expired
+            const age = Date.now() - data.timestamp;
+            const maxAge = RESUME_EXPIRY_HOURS * 60 * 60 * 1000;
+            
+            if (age > maxAge) {
+                debugLog('resume', '⏰ Partial transfer expired, deleting', { age, maxAge });
+                await deletePartialTransfer(sessionCode);
+                return null;
+            }
+            
+            debugLog('resume', '📂 Loaded partial transfer', {
+                chunksReceived: data.receivedChunks.length,
+                totalChunks: data.totalChunks,
+                progress: `${Math.round((data.receivedChunks.length / data.totalChunks) * 100)}%`
+            });
+            
+            return data;
+        }
+        
+        return null;
+    } catch (error) {
+        debugLog('resume', '❌ Failed to load partial transfer', error);
+        return null;
+    }
+}
+
+// Delete partial transfer from IndexedDB
+async function deletePartialTransfer(sessionCode) {
+    if (!ENABLE_RESUME) return;
+    
+    try {
+        const db = await initResumeDB();
+        const transaction = db.transaction([RESUME_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(RESUME_STORE_NAME);
+        
+        store.delete(sessionCode);
+        
+        await new Promise((resolve, reject) => {
+            transaction.oncomplete = () => {
+                debugLog('resume', '🗑️  Deleted partial transfer', { sessionCode });
+                resolve();
+            };
+            transaction.onerror = () => reject(transaction.error);
+        });
+        
+        db.close();
+    } catch (error) {
+        debugLog('resume', '❌ Failed to delete partial transfer', error);
+    }
+}
+
+// ============================================================================
+// COMPRESSION FUNCTIONS
+// ============================================================================
+
+// Check if file should be compressed
+function shouldCompressFile(file) {
+    if (!ENABLE_COMPRESSION) return false;
+    if (file.size < COMPRESSION_MIN_SIZE) return false;
+    
+    // Check by MIME type
+    for (const type of COMPRESSIBLE_TYPES) {
+        if (file.type && file.type.startsWith(type)) {
+            return true;
+        }
+    }
+    
+    // Check by file extension
+    const fileName = file.name.toLowerCase();
+    for (const ext of COMPRESSIBLE_EXTENSIONS) {
+        if (fileName.endsWith(ext)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Compress file data
+async function compressFile(file) {
+    debugLog('compression', '🗜️  Compressing file...', {
+        fileName: file.name,
+        originalSize: file.size
+    });
+    
+    const arrayBuffer = await file.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    const compressedData = pako.gzip(uint8Array, { level: 6 }); // Level 6 = good balance
+    
+    const compressionRatio = ((1 - compressedData.length / file.size) * 100).toFixed(1);
+    
+    debugLog('compression', '✅ Compression complete', {
+        originalSize: file.size,
+        compressedSize: compressedData.length,
+        ratio: `${compressionRatio}%`,
+        savings: `${(file.size - compressedData.length) / 1024 / 1024} MB`
+    });
+    
+    return compressedData;
+}
+
+// Decompress file data
+function decompressFile(compressedData) {
+    debugLog('compression', '📦 Decompressing file...', {
+        compressedSize: compressedData.byteLength
+    });
+    
+    const uint8Array = new Uint8Array(compressedData);
+    const decompressedData = pako.ungzip(uint8Array);
+    
+    debugLog('compression', '✅ Decompression complete', {
+        decompressedSize: decompressedData.byteLength
+    });
+    
+    return decompressedData.buffer;
+}
 
 // ============================================================================
 // UI ELEMENTS
@@ -143,16 +552,16 @@ const btnCancelReceive = document.getElementById('btn-cancel-receive');
 // INITIALIZATION
 // ============================================================================
 
-console.log('🚀 P2P File Transfer - ICP Integration Active');
-console.log('Peer ID:', state.peerId);
-console.log('Attempting to connect to ICP backend canister...');
+
+
+
 
 // ============================================================================
 // EVENT LISTENERS
 // ============================================================================
 
 btnSend.addEventListener('click', () => {
-    console.log('Send mode selected');
+    
     state.currentMode = 'send';
     modeSelection.classList.add('hidden');
     sendMode.classList.remove('hidden');
@@ -160,7 +569,7 @@ btnSend.addEventListener('click', () => {
 });
 
 btnReceive.addEventListener('click', () => {
-    console.log('Receive mode selected');
+    
     state.currentMode = 'receive';
     modeSelection.classList.add('hidden');
     receiveMode.classList.remove('hidden');
@@ -172,7 +581,7 @@ backBtn.addEventListener('click', resetApp);
 fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
-        console.log('File selected:', file.name, formatFileSize(file.size));
+        
         state.selectedFile = file;
         fileName.textContent = `${file.name} (${formatFileSize(file.size)})`;
         createSession();
@@ -195,7 +604,7 @@ btnJoin.addEventListener('click', async () => {
 });
 
 btnAccept.addEventListener('click', () => {
-    console.log('File accepted by receiver');
+    
     filePreview.classList.add('hidden');
     receiverStatus.classList.remove('hidden');
     receiverStatusText.textContent = 'Receiving file...';
@@ -203,7 +612,7 @@ btnAccept.addEventListener('click', () => {
 });
 
 btnReject.addEventListener('click', () => {
-    console.log('File rejected by receiver');
+    
     alert('File transfer rejected');
     resetApp();
 });
@@ -217,7 +626,7 @@ btnCancelReceive.addEventListener('click', resetApp);
 
 async function createSession() {
     try {
-        console.log('Creating session...');
+        
         senderStatus.classList.remove('hidden');
         senderStatusText.textContent = 'Creating session...';
 
@@ -226,11 +635,11 @@ async function createSession() {
         state.sessionCode = response.code;
 
         // IMPORTANT: Sender must also register as a peer!
-        console.log('Registering sender as peer...');
+        
         const registerResponse = await canister.registerPeer(state.sessionCode, state.peerId);
         
         if (registerResponse.err) {
-            console.error('Error registering sender:', registerResponse.err);
+            
             alert('Failed to register as peer: ' + registerResponse.err);
             resetApp();
             return;
@@ -241,15 +650,21 @@ async function createSession() {
         senderStatusText.textContent = 'Waiting for receiver...';
         btnCancelSend.classList.remove('hidden');
 
-        console.log('Session created:', { sessionId: state.sessionId, code: state.sessionCode });
-        console.log('Sender registered to session');
+        
+        
 
+        // IMPORTANT: Wait for receiver to join before creating offer
+        senderStatusText.textContent = 'Waiting for receiver to join...';
+        await waitForOtherPeer();
+        
+        senderStatusText.textContent = 'Receiver joined! Establishing connection...';
+        
         // Setup as offerer (sender creates the offer)
         await setupWebRTCConnection(true);
         startPollingForSignals();
 
     } catch (error) {
-        console.error('Error creating session:', error);
+        
         alert('Failed to create session. Please try again.');
         resetApp();
     }
@@ -257,7 +672,7 @@ async function createSession() {
 
 async function joinSession(code) {
     try {
-        console.log('Joining session with code:', code);
+        
         receiverStatus.classList.remove('hidden');
         receiverStatusText.textContent = 'Joining session...';
         btnJoin.disabled = true;
@@ -265,7 +680,7 @@ async function joinSession(code) {
         const response = await canister.registerPeer(code, state.peerId);
 
         if (response.err) {
-            console.error('Error registering peer:', response.err);
+            
             alert(response.err);
             receiverStatusText.textContent = 'Failed to join';
             receiverStatus.classList.add('hidden');
@@ -279,18 +694,47 @@ async function joinSession(code) {
         receiverStatusText.textContent = 'Connecting to peer...';
         btnCancelReceive.classList.remove('hidden');
 
-        console.log('Joined session:', { sessionId: state.sessionId, code: state.sessionCode });
+        
 
         // Setup as answerer (receiver responds to offer)
         await setupWebRTCConnection(false);
         startPollingForSignals();
 
     } catch (error) {
-        console.error('Error joining session:', error);
+        
         alert('Failed to join session. Please try again.');
         receiverStatus.classList.add('hidden');
         btnJoin.disabled = false;
     }
+}
+
+// Helper: Wait for the other peer to join the session
+async function waitForOtherPeer() {
+    
+    
+    return new Promise((resolve) => {
+        const checkInterval = setInterval(async () => {
+            try {
+                // Check session info to see if 2 peers are registered
+                const infoResult = await canister.getSessionInfo(state.sessionCode);
+                
+                // Handle Candid Opt type: returns [] or [value]
+                const info = Array.isArray(infoResult) ? infoResult[0] : infoResult;
+                
+                
+                
+                if (info && info.peerCount >= 2) {
+                    
+                    clearInterval(checkInterval);
+                    resolve();
+                } else if (info) {
+                    
+                }
+            } catch (error) {
+                
+            }
+        }, 1000); // Check every 1 second
+    });
 }
 
 // ============================================================================
@@ -298,37 +742,34 @@ async function joinSession(code) {
 // ============================================================================
 
 async function setupWebRTCConnection(isOfferer) {
-    console.log('Setting up WebRTC connection as', isOfferer ? 'OFFERER' : 'ANSWERER');
+    
 
     state.peerConnection = new RTCPeerConnection(ICE_SERVERS);
 
     // ICE Candidate handling
     state.peerConnection.onicecandidate = async (event) => {
         if (event.candidate) {
-            console.log('New ICE candidate');
             await sendSignalToCanister({
                 type: 'ice-candidate',
                 candidate: event.candidate.toJSON()
             });
-        } else {
-            console.log('ICE gathering complete');
         }
     };
 
     // Connection state monitoring
     state.peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', state.peerConnection.connectionState);
+        
         
         if (state.peerConnection.connectionState === 'connected') {
             state.isConnected = true;
-            console.log('WebRTC connection established!');
+            
             if (state.currentMode === 'send') {
                 senderStatusText.textContent = 'Connected! Preparing file...';
             } else {
                 receiverStatusText.textContent = 'Connected! Waiting for file...';
             }
         } else if (state.peerConnection.connectionState === 'failed') {
-            console.error('Connection failed');
+            
             alert('Connection failed. Please try again.');
             resetApp();
         }
@@ -336,14 +777,14 @@ async function setupWebRTCConnection(isOfferer) {
 
     if (isOfferer) {
         // Sender creates data channel
-        console.log('Creating data channel...');
+        
         state.dataChannel = state.peerConnection.createDataChannel('fileTransfer');
         setupDataChannel();
 
         // Create and send offer
         const offer = await state.peerConnection.createOffer();
         await state.peerConnection.setLocalDescription(offer);
-        console.log('Created SDP offer');
+        
 
         await sendSignalToCanister({
             type: 'offer',
@@ -352,9 +793,9 @@ async function setupWebRTCConnection(isOfferer) {
 
     } else {
         // Receiver waits for data channel
-        console.log('Waiting for data channel...');
+        
         state.peerConnection.ondatachannel = (event) => {
-            console.log('Data channel received');
+            
             state.dataChannel = event.channel;
             setupDataChannel();
         };
@@ -365,13 +806,22 @@ function setupDataChannel() {
     if (!state.dataChannel) return;
 
     state.dataChannel.binaryType = 'arraybuffer';
-    console.log('Data channel configured');
+    
 
-    state.dataChannel.onopen = () => {
-        console.log('✅ Data channel opened!');
+    state.dataChannel.onopen = async () => {
+        debugLog('datachannel', '✅ Data channel opened', {
+            readyState: state.dataChannel.readyState,
+            mode: state.currentMode
+        });
+        
         state.isConnected = true;
 
         if (state.currentMode === 'send') {
+            senderStatusText.textContent = 'Connected! Calibrating connection...';
+            
+            // Calibrate chunk size based on connection speed
+            await calibrateChunkSize();
+            
             senderStatusText.textContent = 'Connected! Sending file metadata...';
             setTimeout(() => sendFileMetadata(), 500);
         } else {
@@ -384,12 +834,12 @@ function setupDataChannel() {
     };
 
     state.dataChannel.onerror = (error) => {
-        console.error('Data channel error:', error);
+        
         alert('Data transfer error occurred');
     };
 
     state.dataChannel.onclose = () => {
-        console.log('Data channel closed');
+        
     };
 }
 
@@ -403,67 +853,134 @@ async function sendSignalToCanister(signal) {
         const response = await canister.sendSignal(state.sessionId, state.peerId, signalJson);
         
         if (response.err) {
-            console.error('Error sending signal:', response.err);
+            
         }
     } catch (error) {
-        console.error('Error sending signal to canister:', error);
+        
     }
 }
 
 function startPollingForSignals() {
-    console.log('Starting signal polling...');
+    
     state.pollingInterval = setInterval(async () => {
         try {
             const response = await canister.getSignals(state.sessionId, state.peerId);
             
             if (response.ok && response.ok.length > 0) {
-                console.log('📨 Received', response.ok.length, 'signal(s)');
+                
+                
+                let newSignalsProcessed = false;
                 
                 for (const signalJson of response.ok) {
                     const signal = JSON.parse(signalJson);
+                    
+                    // Create a unique hash for this signal based on type and content
+                    let signalHash = signal.type;
+                    if (signal.type === 'answer' || signal.type === 'offer') {
+                        // For SDP, use type + first 50 chars of SDP
+                        signalHash = signal.type + '_' + (signal.sdp || '').substring(0, 50);
+                    } else if (signal.type === 'ice-candidate' && signal.candidate) {
+                        // For ICE, use candidate string
+                        signalHash = 'ice_' + (signal.candidate.candidate || '').substring(0, 50);
+                    }
+                    
+                    // Skip if we've already processed this signal
+                    if (state.processedSignals.has(signalHash)) {
+                        
+                        continue;
+                    }
+                    
                     await handleSignalFromCanister(signal);
+                    
+                    // Mark as processed
+                    state.processedSignals.add(signalHash);
+                    newSignalsProcessed = true;
+                }
+                
+                // Only clear if we processed new signals
+                if (newSignalsProcessed) {
+                    // Clear signals after processing
+                    await canister.clearSignals(state.sessionId, state.peerId);
                 }
             }
         } catch (error) {
-            console.error('Error polling for signals:', error);
+            
         }
     }, POLL_INTERVAL);
 }
 
 async function handleSignalFromCanister(signal) {
-    console.log('Handling signal type:', signal.type);
+    
 
     if (signal.type === 'offer') {
         // Receiver gets offer from sender
-        console.log('Received SDP offer, creating answer...');
+        
         await state.peerConnection.setRemoteDescription({
             type: 'offer',
             sdp: signal.sdp
         });
+        state.remoteDescriptionSet = true;
 
         // Create and send answer
         const answer = await state.peerConnection.createAnswer();
         await state.peerConnection.setLocalDescription(answer);
-        console.log('Created SDP answer');
+        
         
         await sendSignalToCanister({
             type: 'answer',
             sdp: answer.sdp
         });
+        
+        // Process any pending ICE candidates
+        if (state.pendingIceCandidates.length > 0) {
+            
+            for (const candidate of state.pendingIceCandidates) {
+                await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+            state.pendingIceCandidates = [];
+        }
 
     } else if (signal.type === 'answer') {
         // Sender gets answer from receiver
-        console.log('Received SDP answer');
-        await state.peerConnection.setRemoteDescription({
-            type: 'answer',
-            sdp: signal.sdp
-        });
+        // Only process if we haven't set remote description yet
+        if (!state.remoteDescriptionSet) {
+            try {
+                
+                await state.peerConnection.setRemoteDescription({
+                    type: 'answer',
+                    sdp: signal.sdp
+                });
+                state.remoteDescriptionSet = true;
+                
+                // Process any pending ICE candidates
+                if (state.pendingIceCandidates.length > 0) {
+                    
+                    for (const candidate of state.pendingIceCandidates) {
+                        await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    }
+                    state.pendingIceCandidates = [];
+                }
+            } catch (error) {
+                // If error setting remote description, it's likely already set
+                
+                state.remoteDescriptionSet = true;
+            }
+        } else {
+            
+        }
 
     } else if (signal.type === 'ice-candidate') {
         // Add ICE candidate
         if (signal.candidate) {
-            console.log('Adding ICE candidate');
-            await state.peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            if (state.remoteDescriptionSet) {
+                // Remote description is set, add candidate immediately
+                
+                await state.peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            } else {
+                // Remote description not set yet, buffer the candidate
+                
+                state.pendingIceCandidates.push(signal.candidate);
+            }
         }
     }
 }
@@ -474,7 +991,7 @@ async function handleSignalFromCanister(signal) {
 
 function sendFileMetadata() {
     if (!state.selectedFile || !state.dataChannel) {
-        console.error('Cannot send metadata: missing file or data channel');
+        
         return;
     }
 
@@ -486,7 +1003,7 @@ function sendFileMetadata() {
         totalChunks: Math.ceil(state.selectedFile.size / CHUNK_SIZE)
     };
 
-    console.log('Sending file metadata:', metadata);
+    
     state.dataChannel.send(JSON.stringify(metadata));
     
     // Auto-send file after a short delay
@@ -495,19 +1012,38 @@ function sendFileMetadata() {
 
 async function sendFileData() {
     if (!state.selectedFile || !state.dataChannel) {
-        console.error('Cannot send file: missing file or data channel');
+        debugLog('transfer', '❌ Cannot send: missing file or data channel');
         return;
     }
 
-    console.log('Starting file transfer...');
+    // Initialize transfer metrics
+    state.transferStartTime = Date.now();
+    state.chunksSent = 0;
+    state.bufferStalls = 0;
+    state.lastSpeedUpdate = Date.now();
+    state.lastBytesTransferred = 0;
+    
+    debugLog('transfer', '🚀 Starting file transfer', {
+        fileName: state.selectedFile.name,
+        fileSize: state.selectedFile.size,
+        chunkSize: CHUNK_SIZE,
+        totalChunks: Math.ceil(state.selectedFile.size / CHUNK_SIZE)
+    });
+    
     senderStatusText.textContent = 'Sending file...';
     document.querySelector('#sender-status .progress-bar').classList.remove('hidden');
 
     const totalChunks = Math.ceil(state.selectedFile.size / CHUNK_SIZE);
     let offset = 0;
     let chunkIndex = 0;
+    let bytesSent = 0;
 
     while (offset < state.selectedFile.size) {
+        // ⭐ FLOW CONTROL: Wait for buffer to drain before sending more
+        if (state.dataChannel.bufferedAmount > BUFFER_CHECK_THRESHOLD) {
+            await waitForBuffer(state.dataChannel);
+        }
+        
         const chunk = state.selectedFile.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await chunk.arrayBuffer();
         
@@ -524,34 +1060,63 @@ async function sendFileData() {
         
         offset += CHUNK_SIZE;
         chunkIndex++;
+        bytesSent += arrayBuffer.byteLength;
+        state.chunksSent++;
+        
+        // Update transfer speed calculation
+        updateTransferSpeed(bytesSent);
 
-        // Update progress
+        // Update progress UI
         const progress = Math.min((chunkIndex / totalChunks) * 100, 100);
         sendProgressBar.style.width = progress + '%';
-        sendProgressText.textContent = `${chunkIndex} / ${totalChunks} chunks (${Math.round(progress)}%)`;
-
-        // Small delay to prevent overwhelming the data channel
-        if (chunkIndex % 10 === 0) {
-            await delay(10);
+        
+        // Show speed in progress text
+        if (state.currentSpeed > 0) {
+            sendProgressText.textContent = `${chunkIndex} / ${totalChunks} chunks (${state.currentSpeed} MB/s)`;
+        } else {
+            sendProgressText.textContent = `${chunkIndex} / ${totalChunks} chunks (${Math.round(progress)}%)`;
+        }
+        
+        // Debug log every 50 chunks
+        if (chunkIndex % 50 === 0) {
+            debugLog('transfer', `📦 Progress: ${chunkIndex}/${totalChunks} chunks`, {
+                progress: `${Math.round(progress)}%`,
+                bytesSent,
+                bufferedAmount: state.dataChannel.bufferedAmount,
+                currentSpeed: `${state.currentSpeed} MB/s`,
+                bufferStalls: state.bufferStalls
+            });
         }
     }
 
     // Send completion signal
     state.dataChannel.send(JSON.stringify({ type: 'complete' }));
     
-    senderStatusText.textContent = 'Transfer complete!';
-    sendProgressText.textContent = `File sent successfully (${formatFileSize(state.selectedFile.size)})`;
+    const transferDuration = ((Date.now() - state.transferStartTime) / 1000).toFixed(2);
+    const avgSpeed = (state.selectedFile.size / (Date.now() - state.transferStartTime) / 1024).toFixed(2);
     
-    console.log('✅ File transfer complete!');
+    debugLog('transfer', '✅ Transfer complete!', {
+        totalChunks: state.chunksSent,
+        fileSize: state.selectedFile.size,
+        duration: `${transferDuration}s`,
+        avgSpeed: `${avgSpeed} MB/s`,
+        bufferStalls: state.bufferStalls
+    });
+    
+    senderStatusText.textContent = 'Transfer complete!';
+    sendProgressText.textContent = `File sent successfully (${formatFileSize(state.selectedFile.size)}) - ${avgSpeed} MB/s avg`;
 }
 
 function handleDataChannelMessage(data) {
     // Check if it's a JSON message (metadata, chunk header, or control message)
     if (typeof data === 'string') {
         const message = JSON.parse(data);
-        console.log('Received message type:', message.type);
         
-        if (message.type === 'metadata') {
+        if (message.type === 'calibration-test') {
+            // Ignore calibration test messages on receiver side
+            debugLog('datachannel', 'Received calibration test (ignoring)');
+            return;
+        } else if (message.type === 'metadata') {
             handleFileMetadata(message);
         } else if (message.type === 'chunk') {
             // Chunk header received, next message will be binary data
@@ -561,20 +1126,33 @@ function handleDataChannelMessage(data) {
             handleTransferComplete();
         }
     } else {
-        // Binary data (chunk)
+        // Binary data (chunk or calibration)
         if (state.expectingChunkData) {
             handleFileChunk(data);
             state.expectingChunkData = false;
+        } else {
+            // Likely calibration data, ignore
+            debugLog('datachannel', `Received ${data.byteLength} bytes (calibration or unexpected)`);
         }
     }
 }
 
 function handleFileMetadata(metadata) {
-    console.log('Received file metadata:', metadata);
+    debugLog('receive', '📄 Received file metadata', {
+        fileName: metadata.fileName,
+        fileSize: metadata.fileSize,
+        totalChunks: metadata.totalChunks
+    });
     
     state.fileMetadata = metadata;
     state.totalChunks = metadata.totalChunks;
     state.receivedChunks = [];
+    
+    // Initialize receive metrics
+    state.transferStartTime = Date.now();
+    state.lastSpeedUpdate = Date.now();
+    state.lastBytesTransferred = 0;
+    state.chunksReceived = 0;
 
     // Show file preview for user acceptance
     previewFilename.textContent = metadata.fileName;
@@ -588,19 +1166,42 @@ function handleFileMetadata(metadata) {
 function handleFileChunk(arrayBuffer) {
     state.receivedChunks.push(arrayBuffer);
     state.receivedBytes += arrayBuffer.byteLength;
+    state.chunksReceived++;
+    
+    // Update transfer speed calculation
+    updateTransferSpeed(state.receivedBytes);
 
     // Update progress
     const progress = Math.min((state.receivedChunks.length / state.totalChunks) * 100, 100);
     receiveProgressBar.style.width = progress + '%';
-    receiveProgressText.textContent = `${state.receivedChunks.length} / ${state.totalChunks} chunks (${Math.round(progress)}%)`;
     
+    // Show speed in progress text
+    if (state.currentSpeed > 0) {
+        receiveProgressText.textContent = `${state.receivedChunks.length} / ${state.totalChunks} chunks (${state.currentSpeed} MB/s)`;
+    } else {
+        receiveProgressText.textContent = `${state.receivedChunks.length} / ${state.totalChunks} chunks (${Math.round(progress)}%)`;
+    }
+    
+    // Debug log every 50 chunks
     if (state.receivedChunks.length % 50 === 0) {
-        console.log(`Received ${state.receivedChunks.length}/${state.totalChunks} chunks`);
+        debugLog('receive', `📦 Progress: ${state.receivedChunks.length}/${state.totalChunks} chunks`, {
+            progress: `${Math.round(progress)}%`,
+            bytesReceived: state.receivedBytes,
+            currentSpeed: `${state.currentSpeed} MB/s`
+        });
     }
 }
 
 function handleTransferComplete() {
-    console.log('Transfer complete! Assembling file...');
+    const transferDuration = ((Date.now() - state.transferStartTime) / 1000).toFixed(2);
+    const avgSpeed = (state.receivedBytes / (Date.now() - state.transferStartTime) / 1024).toFixed(2);
+    
+    debugLog('receive', '✅ Transfer complete!', {
+        totalChunks: state.chunksReceived,
+        fileSize: state.receivedBytes,
+        duration: `${transferDuration}s`,
+        avgSpeed: `${avgSpeed} MB/s`
+    });
     
     // Combine all chunks into a single Blob
     const blob = new Blob(state.receivedChunks, { type: state.fileMetadata.fileType });
@@ -616,9 +1217,9 @@ function handleTransferComplete() {
     URL.revokeObjectURL(url);
 
     receiverStatusText.textContent = 'Download complete!';
-    receiveProgressText.textContent = `File received successfully (${formatFileSize(state.receivedBytes)})`;
+    receiveProgressText.textContent = `File received successfully (${formatFileSize(state.receivedBytes)}) - ${avgSpeed} MB/s avg`;
     
-    console.log('✅ File downloaded:', state.fileMetadata.fileName);
+    debugLog('receive', `📥 File downloaded: ${state.fileMetadata.fileName}`);
 }
 
 // ============================================================================
@@ -638,7 +1239,7 @@ function delay(ms) {
 }
 
 function resetApp() {
-    console.log('Resetting app...');
+    
     state.reset();
 
     modeSelection.classList.remove('hidden');
@@ -665,4 +1266,4 @@ function resetApp() {
     receiveProgressText.textContent = '';
 }
 
-console.log('✅ App ready! Click Send or Receive to start.');
+

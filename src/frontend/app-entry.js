@@ -43,6 +43,17 @@ const idlFactory = ({ IDL }) => {
       [IDL.Text, IDL.Text],
       [Result_1],
       []
+    ),
+    'getSessionInfo': IDL.Func(
+      [IDL.Text],
+      [IDL.Opt(IDL.Record({
+        'sessionId': IDL.Text,
+        'createdAt': IDL.Int,
+        'peerCount': IDL.Nat,
+        'isLocked': IDL.Bool,
+        'isExpired': IDL.Bool
+      }))],
+      ['query']
     )
   });
 };
@@ -51,27 +62,41 @@ const idlFactory = ({ IDL }) => {
 async function initializeICPAgent() {
   try {
     // IMPORTANT: Use BACKEND canister ID, not frontend canister ID
-    // The frontend canister ID is in the URL, but we need the backend one
-    const BACKEND_CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
+    // Detect environment and use appropriate canister ID
+    const isLocal = window.location.hostname === 'localhost' || 
+                    window.location.hostname === '127.0.0.1' ||
+                    window.location.port === '4943';
     
-    const host = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') 
-      ? 'http://127.0.0.1:4943' 
-      : 'https://ic0.app';
+    // Local canister ID (will be different for mainnet)
+    let BACKEND_CANISTER_ID = 'ocqlz-pyaaa-aaaae-achva-cai';
     
-    console.log('Initializing ICP Agent...');
-    console.log('Backend Canister ID:', BACKEND_CANISTER_ID);
-    console.log('Host:', host);
+    // Check if we're on mainnet by looking at the hostname
+    if (window.location.hostname.includes('ic0.app') || 
+        window.location.hostname.includes('icp0.io') ||
+        window.location.hostname.includes('raw.icp0.io')) {
+      // On mainnet - use mainnet backend canister ID
+      BACKEND_CANISTER_ID = 'ocqlz-pyaaa-aaaae-achva-cai'; // Mainnet backend
+    }
+    
+    const host = isLocal ? 'http://127.0.0.1:4943' : 'https://ic0.app';
+    
+    
+    
+    
     
     const agent = new HttpAgent({ host });
     
-    if (host.includes('localhost') || host.includes('127.0.0.1')) {
-      console.log('Fetching root key for local development...');
+    // Only fetch root key for local development (NOT for mainnet!)
+    if (isLocal) {
+      
       await agent.fetchRootKey();
+    } else {
+      
     }
     
     const actor = Actor.createActor(idlFactory, { agent, canisterId: BACKEND_CANISTER_ID });
     
-    console.log('✅ ICP Agent initialized successfully');
+    
     
     // Expose to global scope for app.js
     window.ICPAgent = {
@@ -79,13 +104,14 @@ async function initializeICPAgent() {
       registerPeer: async (code, peerId) => await actor.registerPeer(code, peerId),
       sendSignal: async (sessionId, peerId, signal) => await actor.sendSignal(sessionId, peerId, signal),
       getSignals: async (sessionId, peerId) => await actor.getSignals(sessionId, peerId),
-      clearSignals: async (sessionId, peerId) => await actor.clearSignals(sessionId, peerId)
+      clearSignals: async (sessionId, peerId) => await actor.clearSignals(sessionId, peerId),
+      getSessionInfo: async (code) => await actor.getSessionInfo(code)
     };
     
     return true;
   } catch (error) {
-    console.error('Failed to initialize ICP Agent:', error);
-    console.warn('Falling back to mock implementation');
+    
+    
     
     // Mock fallback (localStorage-based for same-browser testing)
     window.ICPAgent = createMockAgent();
@@ -135,7 +161,7 @@ function createMockAgent() {
       queues[sessionId] = {};
       setMockSignalQueues(queues);
       await delay(300);
-      console.log('Mock: Created session', { sessionId, code });
+      
       return { sessionId, code };
     },
     
@@ -144,7 +170,7 @@ function createMockAgent() {
       const sessions = getMockSessions();
       const session = sessions[code];
       if (!session) {
-        console.log('Mock: Session not found');
+        
         return { err: 'Session not found' };
       }
       if (session.peers.length >= 2) {
@@ -160,7 +186,7 @@ function createMockAgent() {
         queues[session.sessionId][peerId] = [];
         setMockSignalQueues(queues);
       }
-      console.log('Mock: Registered peer');
+      
       return { ok: session.sessionId };
     },
     
@@ -200,6 +226,22 @@ function createMockAgent() {
     
     clearSignals: async () => {
       return { ok: null };
+    },
+    
+    getSessionInfo: async (code) => {
+      await delay(30);
+      const sessions = getMockSessions();
+      const session = sessions[code];
+      if (!session) {
+        return null;
+      }
+      return {
+        sessionId: session.sessionId,
+        createdAt: Date.now() * 1000000,
+        peerCount: session.peers.length,
+        isLocked: session.peers.length >= 2,
+        isExpired: false
+      };
     }
   };
 }
@@ -207,7 +249,7 @@ function createMockAgent() {
 // Initialize agent FIRST, then load app
 (async function() {
   await initializeICPAgent();
-  console.log('ICP Agent ready, loading app...');
+  
   
   // Now import and execute main app code
   require('./app.js');
