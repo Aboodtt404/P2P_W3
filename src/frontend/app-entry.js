@@ -223,6 +223,5 @@ function createMockAgent() {
 
 (async function() {
   await initializeICPAgent();
-  
   require('./app.js');
 })();

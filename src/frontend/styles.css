@@ -379,6 +379,13 @@ header {
     margin-bottom: var(--spacing-lg);
 }
 
+.file-preview-note {
+    text-align: center;
+    color: var(--slate-400);
+    font-size: 0.875rem;
+    margin-top: var(--spacing-md);
+}
+
 .file-header {
     display: flex;
     align-items: flex-start;

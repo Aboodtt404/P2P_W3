@@ -1,15 +1,10 @@
-import Array "mo:base/Array";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";
 import Int "mo:base/Int";
-import Hash "mo:base/Hash";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Buffer "mo:base/Buffer";
-import Random "mo:base/Random";
-import Blob "mo:base/Blob";
-import Nat8 "mo:base/Nat8";
 import Option "mo:base/Option";
 
 persistent actor P2PSignaling {
@@ -36,7 +31,6 @@ persistent actor P2PSignaling {
     // Constants
     private transient let SESSION_TTL_SECONDS : Int = 600; // 10 minutes
     private transient let MAX_PEERS_PER_SESSION : Nat = 2;
-    private transient let CODE_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     // State
     private transient var sessions = HashMap.HashMap<SessionId, Session>(10, Text.equal, Text.hash);
@@ -76,7 +70,7 @@ persistent actor P2PSignaling {
 
     // Helper: Clean up expired sessions
     private func cleanupExpiredSessions() : () {
-        let now = Time.now();
+        let _now = Time.now();
         let sessionsToRemove = Buffer.Buffer<SessionId>(0);
 
         for ((sessionId, session) in sessions.entries()) {

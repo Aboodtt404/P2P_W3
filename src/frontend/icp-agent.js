@@ -1,13 +1,13 @@
+
 (function() {
     'use strict';
-
     if (typeof window.ic === 'undefined' || typeof window.ic.HttpAgent === 'undefined') {
+
         window.ICPAgent = createMockAgent();
         return;
     }
 
     const { HttpAgent, Actor } = window.ic;
-
     const idlFactory = ({ IDL }) => {
         const Result = IDL.Variant({
             'ok': IDL.Text,
@@ -52,7 +52,6 @@
             )
         });
     };
-
     function getCanisterId() {
         const urlParams = new URLSearchParams(window.location.search);
         const canisterIdFromUrl = urlParams.get('canisterId');
@@ -61,6 +60,7 @@
             return canisterIdFromUrl;
         }
         
+
         return 'uxrrr-q7777-77774-qaaaq-cai';
     }
 
@@ -70,7 +70,6 @@
         }
         return 'https://ic0.app';
     }
-
     let actor = null;
     let isInitialized = false;
 
@@ -78,21 +77,31 @@
         if (isInitialized) return actor;
         
         try {
+
+            
             const canisterId = getCanisterId();
             const host = getHost();
             
+
+
+            
+
             const agent = new HttpAgent({ host });
             
+
             if (host.includes('localhost') || host.includes('127.0.0.1')) {
+
                 await agent.fetchRootKey();
             }
             
+
             actor = Actor.createActor(idlFactory, {
                 agent,
                 canisterId,
             });
             
             isInitialized = true;
+
             
             return actor;
             
@@ -100,18 +109,21 @@
             return null;
         }
     }
-
     async function createSession() {
         const canisterActor = await initializeAgent();
         
         if (!canisterActor) {
+
             return await mockCreateSession();
         }
         
         try {
+...');
             const response = await canisterActor.createSession();
+
             return response;
         } catch (error) {
+
             return await mockCreateSession();
         }
     }
@@ -120,13 +132,17 @@
         const canisterActor = await initializeAgent();
         
         if (!canisterActor) {
+
             return await mockRegisterPeer(code, peerId);
         }
         
         try {
+...', { code, peerId });
             const response = await canisterActor.registerPeer(code, peerId);
+
             return response;
         } catch (error) {
+
             return await mockRegisterPeer(code, peerId);
         }
     }
@@ -142,6 +158,7 @@
             const response = await canisterActor.sendSignal(sessionId, peerId, signal);
             return response;
         } catch (error) {
+
             return await mockSendSignal(sessionId, peerId, signal);
         }
     }
@@ -157,6 +174,7 @@
             const response = await canisterActor.getSignals(sessionId, peerId);
             return response;
         } catch (error) {
+
             return await mockGetSignals(sessionId, peerId);
         }
     }
@@ -172,10 +190,10 @@
             const response = await canisterActor.clearSignals(sessionId, peerId);
             return response;
         } catch (error) {
+
             return { ok: null };
         }
     }
-
     window.ICPAgent = {
         createSession,
         registerPeer,
@@ -183,7 +201,6 @@
         getSignals,
         clearSignals
     };
-
     function createMockAgent() {
         return {
             createSession: mockCreateSession,
@@ -249,6 +266,7 @@
         const session = sessions[code];
         
         if (!session) {
+
             return { err: 'Session not found' };
         }
         
@@ -268,6 +286,7 @@
             setMockSignalQueues(queues);
         }
         
+
         return { ok: session.sessionId };
     }
 

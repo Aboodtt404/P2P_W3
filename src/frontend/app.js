@@ -1,29 +1,22 @@
-import pako from 'pako';
 
+import pako from 'pako';
 if (typeof window.ICPAgent === 'undefined') {
+    
     throw new Error('ICPAgent not available');
 }
 
 const canister = window.ICPAgent;
-
-let CHUNK_SIZE = 64 * 1024;
+let CHUNK_SIZE = 256 * 1024;
 const MIN_CHUNK_SIZE = 64 * 1024;
-const MAX_CHUNK_SIZE = 1024 * 1024;
+const MAX_CHUNK_SIZE = 256 * 1024;
 const POLL_INTERVAL = 1000;
-
-const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
-const MAX_BUFFER_SIZE = isMobileDevice ? 8 * 1024 * 1024 : 16 * 1024 * 1024;
-const BUFFER_CHECK_THRESHOLD = isMobileDevice ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
-const CHUNK_DELAY_MS = isMobileDevice ? 10 : 0;
-
+const MAX_BUFFER_SIZE = 12 * 1024 * 1024;
+const BUFFER_CHECK_THRESHOLD = 10 * 1024 * 1024;
 const DEBUG_TRANSFER = true;
-
 const ENABLE_RESUME = true;
 const RESUME_DB_NAME = 'P2PTransferResume';
 const RESUME_STORE_NAME = 'partialTransfers';
 const RESUME_EXPIRY_HOURS = 24;
-
 const ENABLE_COMPRESSION = true;
 const COMPRESSION_MIN_SIZE = 1024;
 const COMPRESSIBLE_TYPES = [
@@ -34,7 +27,6 @@ const COMPRESSIBLE_EXTENSIONS = [
     '.txt', '.js', '.json', '.html', '.css', '.xml', '.csv', '.md',
     '.ts', '.tsx', '.jsx', '.yml', '.yaml', '.log', '.sql', '.sh'
 ];
-
 const ICE_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -63,17 +55,20 @@ class AppState {
         this.peerId = this.generatePeerId();
         this.selectedFile = null;
         
+
         this.peerConnection = null;
         this.dataChannel = null;
         this.isConnected = false;
         this.remoteDescriptionSet = false;
         this.pendingIceCandidates = [];
         
+
         this.fileMetadata = null;
         this.receivedChunks = [];
         this.totalChunks = 0;
         this.receivedBytes = 0;
         
+
         this.transferStartTime = null;
         this.lastSpeedUpdate = null;
         this.lastBytesTransferred = 0;
@@ -82,20 +77,29 @@ class AppState {
         this.chunksSent = 0;
         this.chunksReceived = 0;
         
+
         this.pollingInterval = null;
         
+
         this.expectingChunkData = false;
         this.currentChunkSize = 0;
         
+
         this.processedSignals = new Set();
         
+
         this.isCompressed = false;
         this.originalSize = 0;
         this.compressedSize = 0;
         
+
         this.isResuming = false;
         this.resumeFromChunk = 0;
         this.receivedChunkMap = new Set();
+        
+
+        this.cancelRequested = false;
+        this.cancelPending = false;
     }
 
     generatePeerId() {
@@ -121,6 +125,7 @@ class AppState {
         this.currentChunkSize = 0;
         this.processedSignals = new Set();
         
+
         this.transferStartTime = null;
         this.lastSpeedUpdate = null;
         this.lastBytesTransferred = 0;
@@ -129,13 +134,19 @@ class AppState {
         this.chunksSent = 0;
         this.chunksReceived = 0;
         
+
         this.isCompressed = false;
         this.originalSize = 0;
         this.compressedSize = 0;
         
+
         this.isResuming = false;
         this.resumeFromChunk = 0;
         this.receivedChunkMap = new Set();
+        
+
+        this.cancelRequested = false;
+        this.cancelPending = false;
     }
 
     closeConnections() {
@@ -158,7 +169,6 @@ class AppState {
 }
 
 const state = new AppState();
-
 function debugLog(category, message, data = null) {
     if (!DEBUG_TRANSFER) return;
     
@@ -171,85 +181,88 @@ function debugLog(category, message, data = null) {
         console.log(`${prefix} ${message}`);
     }
 }
-
 async function calibrateChunkSize() {
     if (!state.dataChannel || state.dataChannel.readyState !== 'open') {
         debugLog('calibrate', 'Cannot calibrate: data channel not ready');
+        CHUNK_SIZE = MIN_CHUNK_SIZE;
         return;
     }
     
-    debugLog('calibrate', 'Starting chunk size calibration...', {
-        isMobile: isMobileDevice,
-        userAgent: navigator.userAgent
-    });
+    debugLog('calibrate', 'Starting chunk size calibration...');
     
     const testStart = Date.now();
-    const testSize = 256 * 1024;
+    const testSize = 128 * 1024;
     const testData = new ArrayBuffer(testSize);
     
     try {
         state.dataChannel.send(JSON.stringify({ type: 'calibration-test' }));
+        
+
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
         state.dataChannel.send(testData);
+        
+
+        await new Promise(resolve => setTimeout(resolve, 100));
         
         const sendDuration = Date.now() - testStart;
         const speedMBps = (testSize / sendDuration / 1024).toFixed(2);
         
         debugLog('calibrate', `Test send took ${sendDuration}ms (${speedMBps} MB/s)`);
         
-        if (isMobileDevice) {
-            if (sendDuration < 50) {
-                CHUNK_SIZE = 256 * 1024;
-                debugLog('calibrate', '📱 Mobile device: using 256KB chunks');
-            } else {
-                CHUNK_SIZE = 128 * 1024;
-                debugLog('calibrate', '📱 Mobile device (slow): using 128KB chunks');
-            }
+
+        if (sendDuration < 50) {
+
+            CHUNK_SIZE = 256 * 1024;
+            debugLog('calibrate', '🚀 Fast connection detected, using 256KB chunks');
+        } else if (sendDuration < 100) {
+
+            CHUNK_SIZE = 128 * 1024;
+            debugLog('calibrate', '✅ Good connection detected, using 128KB chunks');
+        } else if (sendDuration < 200) {
+
+            CHUNK_SIZE = MIN_CHUNK_SIZE;
+            debugLog('calibrate', '⚡ Medium connection detected, using 64KB chunks');
         } else {
-            if (sendDuration < 20) {
-                CHUNK_SIZE = MAX_CHUNK_SIZE;
-                debugLog('calibrate', '🚀 Fast connection detected, using 1MB chunks');
-            } else if (sendDuration < 50) {
-                CHUNK_SIZE = 512 * 1024;
-                debugLog('calibrate', '✅ Good connection detected, using 512KB chunks');
-            } else if (sendDuration < 100) {
-                CHUNK_SIZE = 256 * 1024;
-                debugLog('calibrate', '⚡ Medium connection detected, using 256KB chunks');
-            } else {
-                CHUNK_SIZE = MIN_CHUNK_SIZE;
-                debugLog('calibrate', '⚠️  Slow connection detected, using 64KB chunks');
-            }
+
+            CHUNK_SIZE = 32 * 1024;
+            debugLog('calibrate', '⚠️  Slow connection detected, using 32KB chunks');
         }
         
         debugLog('calibrate', `Final chunk size: ${(CHUNK_SIZE / 1024).toFixed(0)}KB`);
     } catch (error) {
-        debugLog('calibrate', 'Calibration failed, using default 64KB chunks', error);
+        debugLog('calibrate', 'Calibration failed, using safe default 64KB chunks', error);
         CHUNK_SIZE = MIN_CHUNK_SIZE;
     }
 }
-
-async function waitForBuffer(channel, maxWait = 5000) {
+async function waitForBuffer(channel, maxWait = 10000) {
     const startTime = Date.now();
+    const targetBuffer = 6 * 1024 * 1024;
     
-    while (channel.bufferedAmount > BUFFER_CHECK_THRESHOLD) {
+    while (channel.bufferedAmount > targetBuffer) {
+
         if (Date.now() - startTime > maxWait) {
             debugLog('buffer', `⚠️  Buffer wait timeout after ${maxWait}ms`, {
                 bufferedAmount: channel.bufferedAmount,
-                threshold: BUFFER_CHECK_THRESHOLD
+                target: targetBuffer
             });
             break;
         }
         
         state.bufferStalls++;
-        debugLog('buffer', `⏳ Waiting for buffer to drain... (${(channel.bufferedAmount / 1024 / 1024).toFixed(2)}MB buffered)`, {
-            bufferedAmount: channel.bufferedAmount,
-            threshold: BUFFER_CHECK_THRESHOLD,
-            stallCount: state.bufferStalls
-        });
         
-        await delay(50);
+
+        if (state.bufferStalls % 100 === 0) {
+            debugLog('buffer', `⏳ Waiting for buffer to drain... (${(channel.bufferedAmount / 1024 / 1024).toFixed(2)}MB buffered)`, {
+                bufferedAmount: channel.bufferedAmount,
+                target: targetBuffer,
+                stallCount: state.bufferStalls
+            });
+        }
+        
+        await delay(5);
     }
 }
-
 function updateTransferSpeed(bytesTransferred) {
     const now = Date.now();
     
@@ -261,6 +274,7 @@ function updateTransferSpeed(bytesTransferred) {
     
     const timeDiff = (now - state.lastSpeedUpdate) / 1000;
     
+
     if (timeDiff >= 1.0) {
         const bytesDiff = bytesTransferred - state.lastBytesTransferred;
         const speedMBps = (bytesDiff / timeDiff / (1024 * 1024)).toFixed(2);
@@ -276,7 +290,6 @@ function updateTransferSpeed(bytesTransferred) {
         });
     }
 }
-
 function initResumeDB() {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(RESUME_DB_NAME, 1);
@@ -293,7 +306,6 @@ function initResumeDB() {
         };
     });
 }
-
 async function savePartialTransfer() {
     if (!ENABLE_RESUME || !state.sessionCode) return;
     
@@ -334,7 +346,6 @@ async function savePartialTransfer() {
         debugLog('resume', '❌ Failed to save partial transfer', error);
     }
 }
-
 async function loadPartialTransfer(sessionCode) {
     if (!ENABLE_RESUME) return null;
     
@@ -352,6 +363,7 @@ async function loadPartialTransfer(sessionCode) {
         db.close();
         
         if (data) {
+
             const age = Date.now() - data.timestamp;
             const maxAge = RESUME_EXPIRY_HOURS * 60 * 60 * 1000;
             
@@ -376,7 +388,6 @@ async function loadPartialTransfer(sessionCode) {
         return null;
     }
 }
-
 async function deletePartialTransfer(sessionCode) {
     if (!ENABLE_RESUME) return;
     
@@ -400,17 +411,18 @@ async function deletePartialTransfer(sessionCode) {
         debugLog('resume', '❌ Failed to delete partial transfer', error);
     }
 }
-
 function shouldCompressFile(file) {
     if (!ENABLE_COMPRESSION) return false;
     if (file.size < COMPRESSION_MIN_SIZE) return false;
     
+
     for (const type of COMPRESSIBLE_TYPES) {
         if (file.type && file.type.startsWith(type)) {
             return true;
         }
     }
     
+
     const fileName = file.name.toLowerCase();
     for (const ext of COMPRESSIBLE_EXTENSIONS) {
         if (fileName.endsWith(ext)) {
@@ -420,7 +432,6 @@ function shouldCompressFile(file) {
     
     return false;
 }
-
 async function compressFile(file) {
     debugLog('compression', '🗜️  Compressing file...', {
         fileName: file.name,
@@ -443,7 +454,6 @@ async function compressFile(file) {
     
     return compressedData;
 }
-
 function decompressFile(compressedData) {
     debugLog('compression', '📦 Decompressing file...', {
         compressedSize: compressedData.byteLength
@@ -463,7 +473,6 @@ const modeSelection = document.getElementById('mode-selection');
 const sendMode = document.getElementById('send-mode');
 const receiveMode = document.getElementById('receive-mode');
 const backBtn = document.getElementById('btn-back');
-
 const btnSend = document.getElementById('btn-send');
 const fileInput = document.getElementById('file-input');
 const fileName = document.getElementById('file-name');
@@ -475,7 +484,6 @@ const senderStatusText = document.getElementById('sender-status-text');
 const sendProgressBar = document.getElementById('send-progress');
 const sendProgressText = document.getElementById('send-progress-text');
 const btnCancelSend = document.getElementById('btn-cancel-send');
-
 const btnReceive = document.getElementById('btn-receive');
 const codeInput = document.getElementById('code-input');
 const btnJoin = document.getElementById('btn-join');
@@ -483,24 +491,14 @@ const filePreview = document.getElementById('file-preview');
 const previewFilename = document.getElementById('preview-filename');
 const previewFilesize = document.getElementById('preview-filesize');
 const previewFiletype = document.getElementById('preview-filetype');
-const btnAccept = document.getElementById('btn-accept');
-const btnReject = document.getElementById('btn-reject');
 const receiverStatus = document.getElementById('receiver-status');
 const receiverStatusText = document.getElementById('receiver-status-text');
 const receiveProgressBar = document.getElementById('receive-progress');
 const receiveProgressText = document.getElementById('receive-progress-text');
 const btnCancelReceive = document.getElementById('btn-cancel-receive');
 
-debugLog('init', '🚀 P2P Transfer initialized', {
-    isMobile: isMobileDevice,
-    bufferLimit: `${(MAX_BUFFER_SIZE / 1024 / 1024).toFixed(0)}MB`,
-    bufferThreshold: `${(BUFFER_CHECK_THRESHOLD / 1024 / 1024).toFixed(0)}MB`,
-    chunkDelay: `${CHUNK_DELAY_MS}ms`,
-    userAgent: navigator.userAgent
-});
-
-
 btnSend.addEventListener('click', () => {
+    
     state.currentMode = 'send';
     modeSelection.classList.add('hidden');
     sendMode.classList.remove('hidden');
@@ -508,6 +506,7 @@ btnSend.addEventListener('click', () => {
 });
 
 btnReceive.addEventListener('click', () => {
+    
     state.currentMode = 'receive';
     modeSelection.classList.add('hidden');
     receiveMode.classList.remove('hidden');
@@ -519,6 +518,7 @@ backBtn.addEventListener('click', resetApp);
 fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
+        
         state.selectedFile = file;
         fileName.textContent = `${file.name} (${formatFileSize(file.size)})`;
         createSession();
@@ -540,33 +540,29 @@ btnJoin.addEventListener('click', async () => {
     await joinSession(code);
 });
 
-btnAccept.addEventListener('click', () => {
-    filePreview.classList.add('hidden');
-    receiverStatus.classList.remove('hidden');
-    receiverStatusText.textContent = 'Receiving file...';
-    document.querySelector('#receiver-status .progress-bar').classList.remove('hidden');
-});
-
-btnReject.addEventListener('click', () => {
-    alert('File transfer rejected');
-    resetApp();
-});
-
-btnCancelSend.addEventListener('click', resetApp);
-btnCancelReceive.addEventListener('click', resetApp);
+btnCancelSend.addEventListener('click', requestCancelTransfer);
+btnCancelReceive.addEventListener('click', requestCancelTransfer);
 
 async function createSession() {
     try {
+        console.log('🚀 Creating session...', { canister: !!canister, peerId: state.peerId });
+        
+        if (!canister || !canister.createSession) {
+            throw new Error('ICP Canister not loaded. Please refresh the page.');
+        }
+        
         senderStatus.classList.remove('hidden');
         senderStatusText.textContent = 'Creating session...';
 
         const response = await canister.createSession();
+        console.log('✅ Session created:', response);
         state.sessionId = response.sessionId;
         state.sessionCode = response.code;
-
+        
         const registerResponse = await canister.registerPeer(state.sessionCode, state.peerId);
         
         if (registerResponse.err) {
+            
             alert('Failed to register as peer: ' + registerResponse.err);
             resetApp();
             return;
@@ -577,22 +573,29 @@ async function createSession() {
         senderStatusText.textContent = 'Waiting for receiver...';
         btnCancelSend.classList.remove('hidden');
 
+        
+        
+
+
         senderStatusText.textContent = 'Waiting for receiver to join...';
         await waitForOtherPeer();
         
         senderStatusText.textContent = 'Receiver joined! Establishing connection...';
         
+
         await setupWebRTCConnection(true);
         startPollingForSignals();
 
     } catch (error) {
-        alert('Failed to create session. Please try again.');
+        console.error('❌ Session creation error:', error);
+        alert('Failed to create session: ' + (error.message || error));
         resetApp();
     }
 }
 
 async function joinSession(code) {
     try {
+        
         receiverStatus.classList.remove('hidden');
         receiverStatusText.textContent = 'Joining session...';
         btnJoin.disabled = true;
@@ -600,6 +603,7 @@ async function joinSession(code) {
         const response = await canister.registerPeer(code, state.peerId);
 
         if (response.err) {
+            
             alert(response.err);
             receiverStatusText.textContent = 'Failed to join';
             receiverStatus.classList.add('hidden');
@@ -613,37 +617,49 @@ async function joinSession(code) {
         receiverStatusText.textContent = 'Connecting to peer...';
         btnCancelReceive.classList.remove('hidden');
 
+        
         await setupWebRTCConnection(false);
         startPollingForSignals();
 
     } catch (error) {
-        alert('Failed to join session. Please try again.');
+        console.error('❌ Join session error:', error);
+        alert('Failed to join session: ' + (error.message || error));
         receiverStatus.classList.add('hidden');
         btnJoin.disabled = false;
     }
 }
-
 async function waitForOtherPeer() {
+    
+    
     return new Promise((resolve) => {
         const checkInterval = setInterval(async () => {
             try {
+
                 const infoResult = await canister.getSessionInfo(state.sessionCode);
                 
+
                 const info = Array.isArray(infoResult) ? infoResult[0] : infoResult;
                 
+                
+                
                 if (info && info.peerCount >= 2) {
+                    
                     clearInterval(checkInterval);
                     resolve();
+                } else if (info) {
+                    
                 }
             } catch (error) {
+                
             }
         }, 1000);
     });
 }
 
 async function setupWebRTCConnection(isOfferer) {
-    state.peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    
 
+    state.peerConnection = new RTCPeerConnection(ICE_SERVERS);
     state.peerConnection.onicecandidate = async (event) => {
         if (event.candidate) {
             await sendSignalToCanister({
@@ -652,9 +668,12 @@ async function setupWebRTCConnection(isOfferer) {
             });
         }
     };
-
     state.peerConnection.onconnectionstatechange = () => {
-        if (state.peerConnection.connectionState === 'connected') {
+        const connState = state.peerConnection.connectionState;
+        console.log('🔌 Connection state:', connState);
+        debugLog('webrtc', `Connection state: ${connState}`);
+        
+        if (connState === 'connected') {
             state.isConnected = true;
             
             if (state.currentMode === 'send') {
@@ -662,18 +681,32 @@ async function setupWebRTCConnection(isOfferer) {
             } else {
                 receiverStatusText.textContent = 'Connected! Waiting for file...';
             }
-        } else if (state.peerConnection.connectionState === 'failed') {
+        } else if (connState === 'failed') {
+            console.error('❌ Connection failed');
             alert('Connection failed. Please try again.');
             resetApp();
+        } else if (connState === 'disconnected') {
+            console.warn('⚠️  Connection disconnected');
+            debugLog('webrtc', 'Connection disconnected during transfer', {
+                chunksSent: state.chunksSent,
+                chunksReceived: state.chunksReceived
+            });
+        } else if (connState === 'closed') {
+            console.warn('⚠️  Connection closed');
+            debugLog('webrtc', 'Connection closed');
         }
     };
 
     if (isOfferer) {
-        state.dataChannel = state.peerConnection.createDataChannel('fileTransfer');
-        setupDataChannel();
 
+        
+        state.dataChannel = state.peerConnection.createDataChannel('fileTransfer', {
+            ordered: true,          
+        });
+        setupDataChannel();
         const offer = await state.peerConnection.createOffer();
         await state.peerConnection.setLocalDescription(offer);
+        
 
         await sendSignalToCanister({
             type: 'offer',
@@ -681,7 +714,10 @@ async function setupWebRTCConnection(isOfferer) {
         });
 
     } else {
+
+        
         state.peerConnection.ondatachannel = (event) => {
+            
             state.dataChannel = event.channel;
             setupDataChannel();
         };
@@ -692,6 +728,7 @@ function setupDataChannel() {
     if (!state.dataChannel) return;
 
     state.dataChannel.binaryType = 'arraybuffer';
+    
 
     state.dataChannel.onopen = async () => {
         debugLog('datachannel', '✅ Data channel opened', {
@@ -702,9 +739,9 @@ function setupDataChannel() {
         state.isConnected = true;
 
         if (state.currentMode === 'send') {
-            senderStatusText.textContent = 'Connected! Calibrating connection...';
-            
-            await calibrateChunkSize();
+
+            CHUNK_SIZE = 256 * 1024;
+            debugLog('datachannel', `Using initial chunk size: ${(CHUNK_SIZE / 1024)}KB`);
             
             senderStatusText.textContent = 'Connected! Sending file metadata...';
             setTimeout(() => sendFileMetadata(), 500);
@@ -718,21 +755,27 @@ function setupDataChannel() {
     };
 
     state.dataChannel.onerror = (error) => {
-        debugLog('datachannel', '❌ Data channel error!', {
-            error: error,
-            errorType: error?.type,
-            errorMessage: error?.message,
-            readyState: state.dataChannel?.readyState,
-            bufferedAmount: state.dataChannel?.bufferedAmount,
-            isMobile: isMobileDevice,
-            chunkSize: CHUNK_SIZE,
-            receivedChunks: state.receivedChunks.length,
-            totalChunks: state.totalChunks
+        console.error('❌ Data channel error:', error);
+        debugLog('datachannel', '❌ Data channel error', {
+            error: error.message || error,
+            readyState: state.dataChannel?.readyState
         });
-        alert('Data transfer error occurred! Check console for details.');
+        
+
+        if (state.chunksSent > 0 || state.chunksReceived > 0) {
+            alert('Data transfer error occurred. Connection may have been lost.');
+        }
     };
 
     state.dataChannel.onclose = () => {
+        console.warn('⚠️  Data channel closed');
+        debugLog('datachannel', '⚠️  Data channel closed', {
+            mode: state.currentMode,
+            chunksSent: state.chunksSent,
+            chunksReceived: state.chunksReceived
+        });
+        
+        state.isConnected = false;
     };
 }
 
@@ -742,65 +785,85 @@ async function sendSignalToCanister(signal) {
         const response = await canister.sendSignal(state.sessionId, state.peerId, signalJson);
         
         if (response.err) {
+            
         }
     } catch (error) {
+        
     }
 }
 
 function startPollingForSignals() {
+    
     state.pollingInterval = setInterval(async () => {
         try {
             const response = await canister.getSignals(state.sessionId, state.peerId);
             
             if (response.ok && response.ok.length > 0) {
+                
+                
                 let newSignalsProcessed = false;
                 
                 for (const signalJson of response.ok) {
                     const signal = JSON.parse(signalJson);
                     
+
                     let signalHash = signal.type;
                     if (signal.type === 'answer' || signal.type === 'offer') {
+
                         signalHash = signal.type + '_' + (signal.sdp || '').substring(0, 50);
                     } else if (signal.type === 'ice-candidate' && signal.candidate) {
+
                         signalHash = 'ice_' + (signal.candidate.candidate || '').substring(0, 50);
                     }
                     
+
                     if (state.processedSignals.has(signalHash)) {
+                        
                         continue;
                     }
                     
                     await handleSignalFromCanister(signal);
                     
+
                     state.processedSignals.add(signalHash);
                     newSignalsProcessed = true;
                 }
                 
+
                 if (newSignalsProcessed) {
+
                     await canister.clearSignals(state.sessionId, state.peerId);
                 }
             }
         } catch (error) {
+            
         }
     }, POLL_INTERVAL);
 }
 
 async function handleSignalFromCanister(signal) {
+    
+
     if (signal.type === 'offer') {
+
+        
         await state.peerConnection.setRemoteDescription({
             type: 'offer',
             sdp: signal.sdp
         });
         state.remoteDescriptionSet = true;
-
         const answer = await state.peerConnection.createAnswer();
         await state.peerConnection.setLocalDescription(answer);
+        
         
         await sendSignalToCanister({
             type: 'answer',
             sdp: answer.sdp
         });
         
+
         if (state.pendingIceCandidates.length > 0) {
+            
             for (const candidate of state.pendingIceCandidates) {
                 await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
             }
@@ -810,28 +873,40 @@ async function handleSignalFromCanister(signal) {
     } else if (signal.type === 'answer') {
         if (!state.remoteDescriptionSet) {
             try {
+                
                 await state.peerConnection.setRemoteDescription({
                     type: 'answer',
                     sdp: signal.sdp
                 });
                 state.remoteDescriptionSet = true;
                 
+
                 if (state.pendingIceCandidates.length > 0) {
+                    
                     for (const candidate of state.pendingIceCandidates) {
                         await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
                     }
                     state.pendingIceCandidates = [];
                 }
             } catch (error) {
+
+                
                 state.remoteDescriptionSet = true;
             }
+        } else {
+            
         }
 
     } else if (signal.type === 'ice-candidate') {
+
         if (signal.candidate) {
             if (state.remoteDescriptionSet) {
+
+                
                 await state.peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
             } else {
+
+                
                 state.pendingIceCandidates.push(signal.candidate);
             }
         }
@@ -843,7 +918,6 @@ async function sendFileMetadata() {
         debugLog('transfer', '❌ Cannot send metadata: missing file or channel');
         return;
     }
-
     const shouldCompress = shouldCompressFile(state.selectedFile);
     let fileToSend = state.selectedFile;
     let actualSize = state.selectedFile.size;
@@ -875,11 +949,34 @@ async function sendFileMetadata() {
         isCompressed: state.isCompressed,
         compressionRatio: state.isCompressed ? `${((1 - actualSize / state.selectedFile.size) * 100).toFixed(1)}%` : 'N/A'
     });
-
     state.fileToSend = fileToSend;
+    
+
+    if (!state.dataChannel || state.dataChannel.readyState !== 'open') {
+        debugLog('transfer', '❌ Data channel not open, waiting...', {
+            readyState: state.dataChannel?.readyState
+        });
+        
+
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Data channel failed to open'));
+            }, 5000);
+            
+            const checkInterval = setInterval(() => {
+                if (state.dataChannel && state.dataChannel.readyState === 'open') {
+                    clearInterval(checkInterval);
+                    clearTimeout(timeout);
+                    debugLog('transfer', '✅ Data channel is now open');
+                    resolve();
+                }
+            }, 100);
+        });
+    }
     
     state.dataChannel.send(JSON.stringify(metadata));
     
+
     setTimeout(() => sendFileData(), 1500);
 }
 
@@ -888,10 +985,30 @@ async function sendFileData() {
         debugLog('transfer', '❌ Cannot send: missing file or data channel');
         return;
     }
+    
 
+    if (state.dataChannel.readyState !== 'open') {
+        debugLog('transfer', '❌ Data channel not open for file transfer', {
+            readyState: state.dataChannel.readyState
+        });
+        alert('Connection not ready. Please try again.');
+        return;
+    }
     const fileToSend = state.fileToSend || state.selectedFile;
     const fileSize = fileToSend.size;
+    
 
+
+    if (fileSize > 100 * 1024 * 1024) {
+        CHUNK_SIZE = 256 * 1024;
+        debugLog('transfer', '📦 Large file detected, using 256KB chunks');
+    } else if (fileSize > 10 * 1024 * 1024) {
+        CHUNK_SIZE = 128 * 1024;
+        debugLog('transfer', '📦 Medium file, using 128KB chunks');
+    } else {
+        CHUNK_SIZE = MIN_CHUNK_SIZE;
+        debugLog('transfer', '📦 Small file, using 64KB chunks');
+    }
     state.transferStartTime = Date.now();
     state.chunksSent = 0;
     state.bufferStalls = 0;
@@ -915,6 +1032,7 @@ async function sendFileData() {
     let bytesSent = 0;
 
     while (offset < fileSize) {
+
         if (state.dataChannel.bufferedAmount > BUFFER_CHECK_THRESHOLD) {
             await waitForBuffer(state.dataChannel);
         }
@@ -922,6 +1040,19 @@ async function sendFileData() {
         const chunk = fileToSend.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await chunk.arrayBuffer();
         
+
+        if (!state.dataChannel || state.dataChannel.readyState !== 'open') {
+            debugLog('transfer', '❌ Data channel closed during transfer', {
+                chunkIndex,
+                totalChunks,
+                readyState: state.dataChannel?.readyState
+            });
+            alert('Connection lost during transfer. Please try again.');
+            resetApp();
+            return;
+        }
+        
+
         const chunkHeader = {
             type: 'chunk',
             index: chunkIndex,
@@ -929,6 +1060,7 @@ async function sendFileData() {
         };
         state.dataChannel.send(JSON.stringify(chunkHeader));
         
+
         state.dataChannel.send(arrayBuffer);
         
         offset += CHUNK_SIZE;
@@ -936,17 +1068,19 @@ async function sendFileData() {
         bytesSent += arrayBuffer.byteLength;
         state.chunksSent++;
         
-        updateTransferSpeed(bytesSent);
 
+        updateTransferSpeed(bytesSent);
         const progress = Math.min((chunkIndex / totalChunks) * 100, 100);
         sendProgressBar.style.width = progress + '%';
         
+
         if (state.currentSpeed > 0) {
             sendProgressText.textContent = `${chunkIndex} / ${totalChunks} chunks (${state.currentSpeed} MB/s)`;
         } else {
             sendProgressText.textContent = `${chunkIndex} / ${totalChunks} chunks (${Math.round(progress)}%)`;
         }
         
+
         if (chunkIndex % 50 === 0) {
             debugLog('transfer', `📦 Progress: ${chunkIndex}/${totalChunks} chunks`, {
                 progress: `${Math.round(progress)}%`,
@@ -956,12 +1090,7 @@ async function sendFileData() {
                 bufferStalls: state.bufferStalls
             });
         }
-        
-        if (CHUNK_DELAY_MS > 0) {
-            await delay(CHUNK_DELAY_MS);
-        }
     }
-
     state.dataChannel.send(JSON.stringify({ type: 'complete' }));
     
     const transferDuration = ((Date.now() - state.transferStartTime) / 1000).toFixed(2);
@@ -980,28 +1109,41 @@ async function sendFileData() {
 }
 
 function handleDataChannelMessage(data) {
+
     if (typeof data === 'string') {
         const message = JSON.parse(data);
         
         if (message.type === 'calibration-test') {
+
             debugLog('datachannel', 'Received calibration test (ignoring)');
             return;
+        } else if (message.type === 'cancel-request') {
+            handleCancelRequest();
+        } else if (message.type === 'cancel-accept') {
+            handleCancelAccept();
+        } else if (message.type === 'cancel-decline') {
+            handleCancelDecline();
         } else if (message.type === 'resume') {
+
             debugLog('transfer', '⏯️  Resume request received', { fromChunk: message.fromChunk });
             state.resumeFromChunk = message.fromChunk;
+
         } else if (message.type === 'metadata') {
             handleFileMetadata(message);
         } else if (message.type === 'chunk') {
+
             state.expectingChunkData = true;
             state.currentChunkSize = message.size;
         } else if (message.type === 'complete') {
             handleTransferComplete();
         }
     } else {
+
         if (state.expectingChunkData) {
             handleFileChunk(data);
             state.expectingChunkData = false;
         } else {
+
             debugLog('datachannel', `Received ${data.byteLength} bytes (calibration or unexpected)`);
         }
     }
@@ -1021,11 +1163,13 @@ async function handleFileMetadata(metadata) {
     state.isCompressed = metadata.isCompressed || false;
     state.originalSize = metadata.originalSize || metadata.fileSize;
     
+
     state.transferStartTime = Date.now();
     state.lastSpeedUpdate = Date.now();
     state.lastBytesTransferred = 0;
     state.chunksReceived = 0;
     
+
     if (ENABLE_RESUME) {
         const partial = await loadPartialTransfer(state.sessionCode);
         if (partial && partial.fileMetadata.fileName === metadata.fileName) {
@@ -1037,6 +1181,7 @@ async function handleFileMetadata(metadata) {
             );
             
             if (resumeConfirm) {
+
                 state.receivedChunks = partial.receivedChunks;
                 state.receivedChunkMap = new Set(partial.receivedChunkMap);
                 state.receivedBytes = partial.receivedBytes;
@@ -1047,16 +1192,17 @@ async function handleFileMetadata(metadata) {
                     total: partial.totalChunks
                 });
                 
+
                 state.dataChannel.send(JSON.stringify({
                     type: 'resume',
                     fromChunk: partial.receivedChunks.length
                 }));
             } else {
+
                 await deletePartialTransfer(state.sessionCode);
             }
         }
     }
-
     previewFilename.textContent = metadata.fileName;
     previewFilesize.textContent = formatFileSize(metadata.originalSize || metadata.fileSize);
     
@@ -1067,8 +1213,17 @@ async function handleFileMetadata(metadata) {
     }
     previewFiletype.textContent = typeText;
     
+
     receiverStatus.classList.add('hidden');
     filePreview.classList.remove('hidden');
+    
+
+    setTimeout(() => {
+        filePreview.classList.add('hidden');
+        receiverStatus.classList.remove('hidden');
+        receiverStatusText.textContent = 'Receiving file...';
+        document.querySelector('#receiver-status .progress-bar').classList.remove('hidden');
+    }, 1500);
 }
 
 function handleFileChunk(arrayBuffer) {
@@ -1077,21 +1232,22 @@ function handleFileChunk(arrayBuffer) {
     state.chunksReceived++;
     state.receivedChunkMap.add(state.chunksReceived - 1);
     
-    updateTransferSpeed(state.receivedBytes);
 
+    updateTransferSpeed(state.receivedBytes);
     if (ENABLE_RESUME && state.receivedChunks.length % 50 === 0) {
         savePartialTransfer();
     }
-
     const progress = Math.min((state.receivedChunks.length / state.totalChunks) * 100, 100);
     receiveProgressBar.style.width = progress + '%';
     
+
     if (state.currentSpeed > 0) {
         receiveProgressText.textContent = `${state.receivedChunks.length} / ${state.totalChunks} chunks (${state.currentSpeed} MB/s)`;
     } else {
         receiveProgressText.textContent = `${state.receivedChunks.length} / ${state.totalChunks} chunks (${Math.round(progress)}%)`;
     }
     
+
     if (state.receivedChunks.length % 50 === 0) {
         debugLog('receive', `📦 Progress: ${state.receivedChunks.length}/${state.totalChunks} chunks`, {
             progress: `${Math.round(progress)}%`,
@@ -1115,13 +1271,16 @@ async function handleTransferComplete() {
     
     let blob;
     
+
     if (state.isCompressed) {
         receiverStatusText.textContent = 'Decompressing file...';
         
         try {
+
             const compressedBlob = new Blob(state.receivedChunks);
             const compressedData = await compressedBlob.arrayBuffer();
             
+
             const decompressedData = decompressFile(compressedData);
             blob = new Blob([decompressedData], { type: state.fileMetadata.fileType });
             
@@ -1136,9 +1295,11 @@ async function handleTransferComplete() {
             return;
         }
     } else {
+
         blob = new Blob(state.receivedChunks, { type: state.fileMetadata.fileType });
     }
     
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1147,7 +1308,6 @@ async function handleTransferComplete() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
     if (ENABLE_RESUME) {
         deletePartialTransfer(state.sessionCode);
     }
@@ -1170,7 +1330,116 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function requestCancelTransfer() {
+    if (!state.dataChannel || state.dataChannel.readyState !== 'open') {
+
+        console.log('No active connection, canceling locally');
+        resetApp();
+        return;
+    }
+    
+    if (state.cancelPending) {
+        console.log('Cancel already pending');
+        return;
+    }
+    
+
+    state.cancelRequested = true;
+    state.cancelPending = true;
+    
+    console.log('📤 Sending cancel request to peer');
+    state.dataChannel.send(JSON.stringify({ 
+        type: 'cancel-request' 
+    }));
+    
+
+    const statusText = state.currentMode === 'send' ? senderStatusText : receiverStatusText;
+    statusText.textContent = 'Requesting cancellation from peer...';
+    
+
+    btnCancelSend.disabled = true;
+    btnCancelReceive.disabled = true;
+    
+
+    setTimeout(() => {
+        if (state.cancelPending) {
+            console.log('⏰ Cancel request timed out, forcing cancel');
+            alert('Peer did not respond to cancel request. Canceling transfer.');
+            resetApp();
+        }
+    }, 10000);
+}
+
+function handleCancelRequest() {
+    console.log('📨 Received cancel request from peer');
+    
+    const mode = state.currentMode === 'send' ? 'Sender' : 'Receiver';
+    const confirmed = confirm(
+        `${mode} wants to cancel the transfer.\n\n` +
+        `Do you agree to cancel?`
+    );
+    
+    if (confirmed) {
+        console.log('✅ User accepted cancel request');
+        
+
+        if (state.dataChannel && state.dataChannel.readyState === 'open') {
+            state.dataChannel.send(JSON.stringify({ 
+                type: 'cancel-accept' 
+            }));
+        }
+        
+        alert('Transfer canceled by mutual agreement.');
+        resetApp();
+    } else {
+        console.log('❌ User declined cancel request');
+        
+
+        if (state.dataChannel && state.dataChannel.readyState === 'open') {
+            state.dataChannel.send(JSON.stringify({ 
+                type: 'cancel-decline' 
+            }));
+        }
+        
+
+        const statusText = state.currentMode === 'send' ? senderStatusText : receiverStatusText;
+        if (state.currentMode === 'send') {
+            statusText.textContent = 'Sending file...';
+        } else {
+            statusText.textContent = 'Receiving file...';
+        }
+    }
+}
+
+function handleCancelAccept() {
+    console.log('✅ Peer accepted cancel request');
+    state.cancelPending = false;
+    alert('Peer agreed to cancel. Transfer canceled.');
+    resetApp();
+}
+
+function handleCancelDecline() {
+    console.log('❌ Peer declined cancel request');
+    state.cancelRequested = false;
+    state.cancelPending = false;
+    
+
+    btnCancelSend.disabled = false;
+    btnCancelReceive.disabled = false;
+    
+    alert('Peer declined cancellation. Transfer continues.');
+    
+
+    const statusText = state.currentMode === 'send' ? senderStatusText : receiverStatusText;
+    if (state.currentMode === 'send') {
+        statusText.textContent = 'Sending file...';
+    } else {
+        statusText.textContent = 'Receiving file...';
+    }
+}
+
 function resetApp() {
+    
     state.reset();
 
     modeSelection.classList.remove('hidden');
@@ -1182,6 +1451,7 @@ function resetApp() {
     senderStatus.classList.add('hidden');
     document.querySelector('#sender-status .progress-bar').classList.add('hidden');
     btnCancelSend.classList.add('hidden');
+    btnCancelSend.disabled = false;
     fileInput.value = '';
     fileName.textContent = 'Choose a file to share';
     sendProgressBar.style.width = '0%';
@@ -1192,6 +1462,7 @@ function resetApp() {
     filePreview.classList.add('hidden');
     document.querySelector('#receiver-status .progress-bar').classList.add('hidden');
     btnCancelReceive.classList.add('hidden');
+    btnCancelReceive.disabled = false;
     btnJoin.disabled = false;
     receiveProgressBar.style.width = '0%';
     receiveProgressText.textContent = '';
